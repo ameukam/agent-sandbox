@@ -297,6 +297,11 @@ Run `sandbox-router --help` for the full list. The most relevant:
 | `--path-routing-rewrite-responses` | `true` | Rewrite upstream `Location` and `Set-Cookie` Path for path-routed responses so they stay under the prefix. Set-Cookie Path is rewritten in both modes; Location only without `--path-routing-preserve-prefix`. Set `false` to forward responses unmodified. |
 | `--grpc-web-allowed-origins` | `""` (same-origin only) | Comma-separated `scheme://host[:port]` allowlist of browser origins permitted to call the router with gRPC-Web. Gates only gRPC-Web CORS — see [gRPC-Web](#grpc-web-browser-clients). Transcoding itself is always on. |
 | `--cache-enabled` | `false` | Enable the Pod-IP cache (KEP-NNNN fast path). Requires the RBAC in `deploy/rbac.yaml`. |
+| `--wake-enabled` | `false` | Alpha, experimental. Serve `X-Sandbox-Wake: true` requests for Sandboxes that use `spec.desiredLifecycle`: authorize the request, set `desiredLifecycle` to `Active`, wait for the current ready execution Pod, then proxy to it. Requires a non-`allow-all` `--authz-mode` and the RBAC in `deploy/rbac-wake.yaml`. The controller does not yet restore a checkpoint into a replacement Pod, so a wake of a hibernated Sandbox ends in 503 at the deadline. |
+| `--wake-max-waiting-per-sandbox` | `8` | Maximum wake requests waiting for one Sandbox. Further requests get 503 with `Retry-After`. |
+| `--wake-max-waiting` | `256` | Maximum wake requests waiting across all Sandboxes. Must be at least `--wake-max-waiting-per-sandbox`. |
+| `--wake-deadline` | `30s` | How long one wake request waits for the current execution Pod before it gets 503 with `Retry-After`. |
+| `--wake-retry-after` | `5s` | Delay advertised in `Retry-After` on a 503 wake response, rounded up to whole seconds. |
 | `--cache-namespace` | `""` (cluster-wide) | Restrict the Pod informer to a single namespace. |
 | `--kubeconfig` | `""` (in-cluster) | Kubeconfig for the cache's informer client. Honors `KUBECONFIG`. |
 | `--enable-tracing` | auto | OTel traces via OTLP gRPC. Auto-enabled when `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` is set; pass `--enable-tracing=false` to override. |

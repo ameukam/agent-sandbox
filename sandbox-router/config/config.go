@@ -252,6 +252,26 @@ type Config struct {
 	// standard KUBECONFIG env var.
 	Kubeconfig string
 
+	// WakeEnabled turns on the alpha, experimental wake path for Sandboxes
+	// that use spec.desiredLifecycle. When true, a request with
+	// X-Sandbox-Wake: true is authorized, then held in a bounded queue while
+	// the router sets spec.desiredLifecycle to Active and waits for the
+	// current ready execution Pod. When false (the default), the router
+	// treats that header like any other header.
+	WakeEnabled bool
+	// WakeMaxWaitingPerSandbox bounds the wake requests that wait for one
+	// Sandbox at a time.
+	WakeMaxWaitingPerSandbox int
+	// WakeMaxWaiting bounds the wake requests that wait across all
+	// Sandboxes at a time.
+	WakeMaxWaiting int
+	// WakeDeadline bounds how long one wake request waits for the current
+	// execution Pod before the router answers 503.
+	WakeDeadline time.Duration
+	// WakeRetryAfter is the delay the router advertises in Retry-After on a
+	// 503 wake response.
+	WakeRetryAfter time.Duration
+
 	// AuthzMode selects how every inbound request is authorized.
 	// Defaults to allow-all (Python compatibility); set to tokenreview
 	// to enforce Bearer-token authentication via the K8s TokenReview
@@ -381,6 +401,10 @@ func Defaults() Config {
 		UpstreamRetryInitialDelay:   200 * time.Millisecond,
 		UpstreamRetryMaxDelay:       800 * time.Millisecond,
 		AccessLog:                   true,
+		WakeMaxWaitingPerSandbox:    8,
+		WakeMaxWaiting:              256,
+		WakeDeadline:                30 * time.Second,
+		WakeRetryAfter:              5 * time.Second,
 		AuthzMode:                   AuthzAllowAll,
 		AuthzTokenReviewTTL:         30 * time.Second,
 		AuthzTokenReviewCacheSize:   2048,
@@ -486,6 +510,25 @@ func (c *Config) Validate() error {
 	case AuthzAllowAll, AuthzTokenReview, AuthzScopedToken:
 	default:
 		return fmt.Errorf("invalid --authz-mode %q (want allow-all, tokenreview, or scoped-token)", c.AuthzMode)
+	}
+	if c.WakeEnabled {
+		if c.WakeMaxWaitingPerSandbox <= 0 {
+			return fmt.Errorf("--wake-max-waiting-per-sandbox must be positive, got %d", c.WakeMaxWaitingPerSandbox)
+		}
+		if c.WakeMaxWaiting < c.WakeMaxWaitingPerSandbox {
+			return fmt.Errorf("--wake-max-waiting (%d) must be at least --wake-max-waiting-per-sandbox (%d)", c.WakeMaxWaiting, c.WakeMaxWaitingPerSandbox)
+		}
+		if c.WakeDeadline <= 0 {
+			return fmt.Errorf("--wake-deadline must be positive, got %s", c.WakeDeadline)
+		}
+		if c.WakeRetryAfter <= 0 {
+			return fmt.Errorf("--wake-retry-after must be positive, got %s", c.WakeRetryAfter)
+		}
+		// A wake changes the Sandbox spec, so an unauthenticated caller
+		// must not be able to trigger one.
+		if c.AuthzMode == AuthzAllowAll {
+			return errors.New("--wake-enabled requires --authz-mode=tokenreview or --authz-mode=scoped-token")
+		}
 	}
 	if c.AuthzTokenReviewTTL <= 0 {
 		return fmt.Errorf("--authz-tokenreview-ttl must be positive, got %s", c.AuthzTokenReviewTTL)
