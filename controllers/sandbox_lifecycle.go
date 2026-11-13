@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
@@ -37,6 +38,12 @@ import (
 )
 
 const (
+	// unrecordedPlacementGracePeriod is how long the controller keeps a gated
+	// Pod whose placement epoch is newer than the cached Sandbox status. The
+	// Pod and Sandbox informers are independent, so the Pod can be observed
+	// before the status patch that recorded its placement.
+	unrecordedPlacementGracePeriod = time.Minute
+
 	eventReasonAwaitingExecutionFence = sandboxv1beta1.SandboxReasonAwaitingExecutionFence
 	eventReasonExecutionPodRemoved    = "ExecutionPodRemovedForHibernation"
 )
@@ -208,25 +215,35 @@ func (r *SandboxReconciler) deleteExecutionPod(ctx context.Context, pod *corev1.
 // reconcileManagedExistingPod applies the execution lifecycle to an owned Pod.
 // It returns handled=false only for the current execution while the Sandbox is
 // Active, so the caller continues with ordinary Pod metadata reconciliation.
-func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (bool, error) {
+// A non-zero requeue asks the caller to reconcile again after that delay.
+func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (handled bool, requeue time.Duration, err error) {
 	logger := log.FromContext(ctx)
 	if !isOwnedBySandbox(pod, sandbox) {
 		// Adopting a Pod would make an execution that never held a placement
 		// epoch, so a lifecycle-managed Sandbox never adopts one.
-		return true, fmt.Errorf("pod %q is not controlled by sandbox %q, and lifecycle-managed sandboxes do not adopt pods", pod.Name, sandbox.Name)
+		return true, 0, fmt.Errorf("pod %q is not controlled by sandbox %q, and lifecycle-managed sandboxes do not adopt pods", pod.Name, sandbox.Name)
 	}
 
 	if !isCurrentExecutionPod(sandbox, pod) {
 		if hasPlacementSchedulingGate(pod) && pod.DeletionTimestamp.IsZero() {
-			// The placement for this Pod was never recorded, and the gate kept it
-			// from running, so deleting it cannot end a live execution.
+			// Deleting a gated Pod is always safe because it never ran. A Pod
+			// with a newer epoch may still be recorded, though, and deleting it
+			// early would leave the Sandbox waiting for a fence of an execution
+			// that never ran.
+			if epoch, ok := podPlacementEpoch(pod); ok && epoch > sandbox.Status.PlacementEpoch {
+				if wait := unrecordedPlacementGracePeriod - time.Since(pod.CreationTimestamp.Time); wait > 0 {
+					logger.V(4).Info("Waiting for the placement of a gated Pod to be observed",
+						"Pod.Name", pod.Name, "Pod.UID", pod.UID, "wait", wait)
+					return true, wait, nil
+				}
+			}
 			logger.Info("Deleting gated Pod whose placement was not recorded",
 				"Pod.Name", pod.Name, "Pod.UID", pod.UID)
-			return true, r.deleteExecutionPod(ctx, pod)
+			return true, 0, r.deleteExecutionPod(ctx, pod)
 		}
 		// An unrecorded Pod that may have run is evidence; keep it and report
 		// RecoveryRequired instead of deleting or replacing it.
-		return true, nil
+		return true, 0, nil
 	}
 
 	if hasPlacementSchedulingGate(pod) {
@@ -235,20 +252,20 @@ func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, san
 			return g.Name == sandboxv1beta1.SandboxPlacementSchedulingGate
 		})
 		if err := r.Patch(ctx, pod, patch); err != nil {
-			return true, fmt.Errorf("failed to remove placement scheduling gate: %w", err)
+			return true, 0, fmt.Errorf("failed to remove placement scheduling gate: %w", err)
 		}
 		logger.Info("Released execution Pod for scheduling", "Pod.Name", pod.Name, "placementEpoch", sandbox.Status.PlacementEpoch)
 	}
 
 	if sandbox.Spec.DesiredLifecycle != sandboxv1beta1.SandboxDesiredLifecycleHibernated {
-		return false, nil
+		return false, 0, nil
 	}
 
 	// Hibernation deletes the execution only after its checkpoint is committed
 	// and the shutdown intent is persisted on the Pod (DESIGN 4.1, 5.2 step 6).
 	if !checkpointOfCurrentExecution(sandbox) {
 		logger.V(4).Info("Keeping execution Pod until its checkpoint is committed", "Pod.Name", pod.Name)
-		return true, nil
+		return true, 0, nil
 	}
 	if pod.Annotations[sandboxv1beta1.SandboxShutdownIntentAnnotation] != sandboxv1beta1.SandboxShutdownIntentHibernate {
 		patch := client.MergeFromWithOptions(pod.DeepCopy(), client.MergeFromWithOptimisticLock{})
@@ -257,15 +274,15 @@ func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, san
 		}
 		pod.Annotations[sandboxv1beta1.SandboxShutdownIntentAnnotation] = sandboxv1beta1.SandboxShutdownIntentHibernate
 		if err := r.Patch(ctx, pod, patch); err != nil {
-			return true, fmt.Errorf("failed to record shutdown intent: %w", err)
+			return true, 0, fmt.Errorf("failed to record shutdown intent: %w", err)
 		}
 		logger.Info("Recorded hibernation shutdown intent on execution Pod", "Pod.Name", pod.Name)
 		// Delete in a later pass, after the cache reflects the persisted intent.
-		return true, nil
+		return true, 0, nil
 	}
 	if pod.DeletionTimestamp.IsZero() {
 		if err := r.deleteExecutionPod(ctx, pod); err != nil {
-			return true, err
+			return true, 0, err
 		}
 		logger.Info("Deleted execution Pod for hibernation", "Pod.Name", pod.Name, "placementEpoch", sandbox.Status.PlacementEpoch)
 		if r.Recorder != nil {
@@ -273,7 +290,7 @@ func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, san
 				"Deleted execution Pod %q after checkpoint %q was committed", pod.Name, sandbox.Status.CommittedCheckpoint.OperationID)
 		}
 	}
-	return true, nil
+	return true, 0, nil
 }
 
 // lifecycleConditions computes the Hibernated and RecoveryRequired conditions

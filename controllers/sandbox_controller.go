@@ -1768,9 +1768,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	// The execution lifecycle owns Pod deletion and replacement for Sandboxes
 	// that opted in; operatingMode does not apply to them.
 	if lifecycleManaged(sandbox) && pod != nil {
-		handled, err := r.reconcileManagedExistingPod(ctx, sandbox, pod)
+		handled, requeue, err := r.reconcileManagedExistingPod(ctx, sandbox, pod)
 		if err != nil || handled {
-			return pod, 0, err
+			return pod, requeue, err
 		}
 	}
 

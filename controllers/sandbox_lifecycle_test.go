@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -378,6 +379,35 @@ func TestLifecycleGatedPodWithUnrecordedPlacementIsDeleted(t *testing.T) {
 	require.NoError(t, reconcileLifecycle(t, r))
 
 	require.Nil(t, getLifecyclePod(t, r))
+}
+
+func TestLifecycleGatedPodFromSupersededPlacementIsDeletedImmediately(t *testing.T) {
+	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-2", 2)
+	pod := executionPod("pod-stale", 2, true)
+	pod.CreationTimestamp = metav1.Now()
+	r, _ := newLifecycleReconciler(t, nil, sb, pod)
+
+	require.NoError(t, reconcileLifecycle(t, r))
+
+	require.Nil(t, getLifecyclePod(t, r))
+}
+
+func TestLifecycleGatedPodNewerThanCachedStatusIsKept(t *testing.T) {
+	// The Pod informer can observe a new execution Pod before the Sandbox
+	// informer observes the status patch that recorded it.
+	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-2", 2)
+	pod := executionPod("pod-3", 3, true)
+	pod.CreationTimestamp = metav1.Now()
+	r, _ := newLifecycleReconciler(t, nil, sb, pod)
+
+	result, err := r.Reconcile(t.Context(), ctrl.Request{NamespacedName: lifecycleKey})
+	require.NoError(t, err)
+
+	require.NotNil(t, getLifecyclePod(t, r))
+	require.Greater(t, result.RequeueAfter, time.Duration(0))
+	require.LessOrEqual(t, result.RequeueAfter, unrecordedPlacementGracePeriod)
+	got := getLifecycleSandbox(t, r)
+	requireCondition(t, got, sandboxv1beta1.SandboxConditionRecoveryRequired, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNoRecoveryRequired)
 }
 
 func TestLifecycleStaleEpochPodReportsRecoveryRequired(t *testing.T) {
