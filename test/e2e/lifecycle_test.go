@@ -59,6 +59,13 @@ func TestSandboxDesiredLifecycleValidation(t *testing.T) {
 	err = tc.CreateWithCleanup(t.Context(), recreate)
 	require.True(t, apierrors.IsInvalid(err), "failedPodPolicy Recreate must be rejected, got %v", err)
 
+	prebound := simpleSandbox(ns)
+	prebound.Name = "prebound"
+	prebound.Spec.DesiredLifecycle = sandboxv1beta1.SandboxDesiredLifecycleActive
+	prebound.Spec.PodTemplate.Spec.NodeName = "some-node"
+	err = tc.CreateWithCleanup(t.Context(), prebound)
+	require.True(t, apierrors.IsInvalid(err), "podTemplate.spec.nodeName must be rejected, got %v", err)
+
 	existing := simpleSandbox(ns)
 	existing.Name = "existing"
 	require.NoError(t, tc.CreateWithCleanup(t.Context(), existing))
