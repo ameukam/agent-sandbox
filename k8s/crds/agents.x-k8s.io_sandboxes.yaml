@@ -4120,6 +4120,9 @@ spec:
             - message: desiredLifecycle requires failedPodPolicy Retain
               rule: '!has(self.desiredLifecycle) || !has(self.failedPodPolicy) ||
                 self.failedPodPolicy == ''Retain'''
+            - message: desiredLifecycle requires podTemplate.spec.nodeName to be empty
+              rule: '!has(self.desiredLifecycle) || !has(self.podTemplate.spec.nodeName)
+                || size(self.podTemplate.spec.nodeName) == 0'
           status:
             properties:
               committedCheckpoint:

@@ -434,6 +434,7 @@ type SandboxBlueprint struct {
 // +kubebuilder:validation:XValidation:rule="has(self.desiredLifecycle) == has(oldSelf.desiredLifecycle)",message="desiredLifecycle can only be set when the Sandbox is created and cannot be removed"
 // +kubebuilder:validation:XValidation:rule="!has(self.desiredLifecycle) || !has(self.operatingMode) || self.operatingMode == 'Running'",message="desiredLifecycle requires operatingMode Running"
 // +kubebuilder:validation:XValidation:rule="!has(self.desiredLifecycle) || !has(self.failedPodPolicy) || self.failedPodPolicy == 'Retain'",message="desiredLifecycle requires failedPodPolicy Retain"
+// +kubebuilder:validation:XValidation:rule="!has(self.desiredLifecycle) || !has(self.podTemplate.spec.nodeName) || size(self.podTemplate.spec.nodeName) == 0",message="desiredLifecycle requires podTemplate.spec.nodeName to be empty"
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
@@ -474,6 +475,8 @@ type SandboxSpec struct {
 	// This field can only be set when the Sandbox is created. It requires
 	// operatingMode Running and failedPodPolicy Retain, because both alternatives
 	// would end or replace an execution without a committed checkpoint or fence.
+	// It also requires an empty podTemplate.spec.nodeName, because a Pod bound
+	// to a node at creation would bypass the placement scheduling gate.
 	// +optional
 	DesiredLifecycle SandboxDesiredLifecycle `json:"desiredLifecycle,omitempty"`
 }

@@ -138,19 +138,25 @@ func uidAssigningCreate(next func(ctx context.Context, c client.WithWatch, obj c
 
 func newLifecycleReconciler(t *testing.T, afterPodCreate func(ctx context.Context, c client.WithWatch, obj client.Object) error, objs ...client.Object) (*SandboxReconciler, *events.FakeRecorder) {
 	t.Helper()
-	initial := make([]client.Object, 0, len(objs))
-	initial = append(initial, objs...)
-	c := newFakeClientWithInterceptor(interceptor.Funcs{Create: uidAssigningCreate(afterPodCreate)})
-	for _, obj := range initial {
-		require.NoError(t, c.Create(t.Context(), obj))
+	return newLifecycleReconcilerWithFuncs(t, interceptor.Funcs{Create: uidAssigningCreate(afterPodCreate)}, objs...)
+}
+
+// newLifecycleReconcilerWithFuncs seeds objs, including Sandbox status,
+// without passing them through funcs, so funcs affect only the reconcile.
+func newLifecycleReconcilerWithFuncs(t *testing.T, funcs interceptor.Funcs, objs ...client.Object) (*SandboxReconciler, *events.FakeRecorder) {
+	t.Helper()
+	base := newFakeClient()
+	for _, obj := range objs {
+		require.NoError(t, base.Create(t.Context(), obj))
 		if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok {
 			status := sb.Status.DeepCopy()
 			live := &sandboxv1beta1.Sandbox{}
-			require.NoError(t, c.Get(t.Context(), lifecycleKey, live))
+			require.NoError(t, base.Get(t.Context(), lifecycleKey, live))
 			live.Status = *status
-			require.NoError(t, c.Status().Update(t.Context(), live))
+			require.NoError(t, base.Status().Update(t.Context(), live))
 		}
 	}
+	c := interceptor.NewClient(base, funcs)
 	recorder := events.NewFakeRecorder(10)
 	return &SandboxReconciler{Client: c, Scheme: Scheme, Recorder: recorder, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}, recorder
 }
@@ -221,6 +227,40 @@ func TestLifecycleFirstPlacementGatesPodUntilEpochIsRecorded(t *testing.T) {
 	sb = getLifecycleSandbox(t, r)
 	requireCondition(t, sb, sandboxv1beta1.SandboxConditionHibernated, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNotHibernated)
 	requireCondition(t, sb, sandboxv1beta1.SandboxConditionRecoveryRequired, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNoRecoveryRequired)
+}
+
+func TestLifecyclePreboundTemplateCreatesNoPod(t *testing.T) {
+	// A Pod with spec.nodeName set skips the scheduler, so the placement gate
+	// could not hold it back if the placement status patch then failed.
+	sb := lifecycleSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive)
+	sb.Spec.PodTemplate.Spec.NodeName = "node-a"
+	statusPatches, podCreates := 0, 0
+	r, _ := newLifecycleReconcilerWithFuncs(t, interceptor.Funcs{
+		Create: uidAssigningCreate(func(_ context.Context, _ client.WithWatch, obj client.Object) error {
+			if _, ok := obj.(*corev1.Pod); ok {
+				podCreates++
+			}
+			return nil
+		}),
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if _, ok := obj.(*sandboxv1beta1.Sandbox); ok {
+				statusPatches++
+				if statusPatches == 1 {
+					return k8serrors.NewConflict(sandboxv1beta1.Resource("sandboxes"), obj.GetName(), errors.New("placement update failed"))
+				}
+			}
+			return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+		},
+	}, sb)
+
+	err := reconcileLifecycle(t, r)
+	require.ErrorContains(t, err, "bypasses the placement scheduling gate")
+
+	require.Zero(t, podCreates, "a prebound execution Pod is never created")
+	require.Nil(t, getLifecyclePod(t, r))
+	got := getLifecycleSandbox(t, r)
+	require.Zero(t, got.Status.PlacementEpoch)
+	require.Empty(t, got.Status.ExecutionPodUID)
 }
 
 func TestLifecycleHibernateKeepsPodUntilCheckpointCommitted(t *testing.T) {

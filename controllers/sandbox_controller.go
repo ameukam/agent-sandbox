@@ -2066,7 +2066,9 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
 	if placement != nil {
-		placement.applyTo(pod)
+		if err := placement.applyTo(pod); err != nil {
+			return nil, 0, err
+		}
 	}
 	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 		return nil, 0, fmt.Errorf("SetControllerReference for Pod failed: %w", err)

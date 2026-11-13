@@ -57,6 +57,8 @@ type SandboxSpecApplyConfiguration struct {
 	// This field can only be set when the Sandbox is created. It requires
 	// operatingMode Running and failedPodPolicy Retain, because both alternatives
 	// would end or replace an execution without a committed checkpoint or fence.
+	// It also requires an empty podTemplate.spec.nodeName, because a Pod bound
+	// to a node at creation would bypass the placement scheduling gate.
 	DesiredLifecycle *apiv1beta1.SandboxDesiredLifecycle `json:"desiredLifecycle,omitempty"`
 }
 

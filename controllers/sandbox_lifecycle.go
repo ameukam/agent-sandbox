@@ -118,8 +118,14 @@ type executionPlacement struct {
 
 // applyTo stamps the placement on a Pod that is about to be created. The
 // scheduling gate keeps the Pod from running until recordExecutionPlacement
-// has stored its UID and epoch in the Sandbox status.
-func (p *executionPlacement) applyTo(pod *corev1.Pod) {
+// has stored its UID and epoch in the Sandbox status. A Pod with
+// spec.nodeName set is bound without the scheduler, so a scheduling gate
+// cannot hold it back; applyTo refuses such a Pod even if validation of the
+// Sandbox was bypassed.
+func (p *executionPlacement) applyTo(pod *corev1.Pod) error {
+	if pod.Spec.NodeName != "" {
+		return fmt.Errorf("execution pod %q sets spec.nodeName %q, which bypasses the placement scheduling gate", pod.Name, pod.Spec.NodeName)
+	}
 	if pod.Annotations == nil {
 		pod.Annotations = map[string]string{}
 	}
@@ -131,6 +137,7 @@ func (p *executionPlacement) applyTo(pod *corev1.Pod) {
 		pod.Annotations[sandboxv1beta1.SandboxCheckpointPlacementEpochAnnotation] = strconv.FormatInt(p.checkpoint.PlacementEpoch, 10)
 	}
 	pod.Spec.SchedulingGates = append(pod.Spec.SchedulingGates, corev1.PodSchedulingGate{Name: sandboxv1beta1.SandboxPlacementSchedulingGate})
+	return nil
 }
 
 // authorizeExecutionPlacement decides whether the controller may create a new
