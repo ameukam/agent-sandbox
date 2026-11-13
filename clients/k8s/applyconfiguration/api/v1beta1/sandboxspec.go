@@ -47,10 +47,12 @@ type SandboxSpecApplyConfiguration struct {
 	OperatingMode *apiv1beta1.SandboxOperatingMode `json:"operatingMode,omitempty"`
 	// desiredLifecycle is an alpha, experimental field that opts the Sandbox into
 	// checkpoint-based deep hibernation:
-	// - Active: the controller keeps one execution Pod. Each execution Pod holds a
-	// placement epoch. A replacement for a previous execution is created only
-	// after an external fencing owner reports the ExecutionFenced condition for
-	// that execution, and it restores from status.committedCheckpoint.
+	// - Active: the controller creates the first execution Pod, which holds
+	// placement epoch 1. The controller does not yet create a replacement for a
+	// previous execution, because no runtime restore contract is implemented.
+	// It reports Ready=False with reason AwaitingExecutionFence until an
+	// external fencing owner reports the ExecutionFenced condition for that
+	// execution, and with reason CheckpointRestoreUnsupported afterwards.
 	// - Hibernated: the controller deletes the execution Pod after a checkpoint of
 	// that execution is committed to status.committedCheckpoint. Once that
 	// checkpoint is committed, the controller finishes the shutdown even if

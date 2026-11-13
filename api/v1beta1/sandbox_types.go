@@ -187,13 +187,20 @@ const (
 	// SandboxConditionExecutionFenced is an alpha, experimental condition that an
 	// external fencing owner sets, not the controller. Status True means the
 	// fencing owner verified that the execution named by status.fencedExecution
-	// can no longer run or write. The controller creates a replacement execution
-	// Pod only when this condition is True and status.fencedExecution matches
-	// status.executionPodUID and status.placementEpoch.
+	// can no longer run or write. The controller reports Hibernated=True, and
+	// treats the previous execution as stopped, only when this condition is True
+	// and status.fencedExecution matches status.executionPodUID and
+	// status.placementEpoch.
 	SandboxConditionExecutionFenced ConditionType = "ExecutionFenced"
 	// SandboxReasonAwaitingExecutionFence is a Ready=False reason: the controller
 	// needs a replacement execution Pod but the previous execution is not fenced.
 	SandboxReasonAwaitingExecutionFence = "AwaitingExecutionFence"
+	// SandboxReasonCheckpointRestoreUnsupported is a Ready=False reason: the
+	// previous execution is fenced and its checkpoint is committed, but the
+	// controller does not create a replacement execution Pod. No runtime restore
+	// contract is implemented or qualified, so nothing could verify that a
+	// replacement restored the checkpoint before it served traffic.
+	SandboxReasonCheckpointRestoreUnsupported = "CheckpointRestoreUnsupported"
 	// SandboxReasonExecutionShuttingDown is a Ready=False reason: a checkpoint of
 	// the current execution is committed, so the controller shuts that
 	// execution down, even if desiredLifecycle changed back to Active.
@@ -208,15 +215,6 @@ const (
 	// controller sets on an execution Pod. Its value is the decimal placement
 	// epoch that the Pod holds.
 	SandboxPlacementEpochAnnotation = "agents.x-k8s.io/placement-epoch"
-	// SandboxCheckpointManifestURIAnnotation carries status.committedCheckpoint.manifestURI
-	// on a replacement execution Pod so the runtime restores from it.
-	SandboxCheckpointManifestURIAnnotation = "agents.x-k8s.io/checkpoint-manifest-uri"
-	// SandboxCheckpointManifestGenerationAnnotation carries status.committedCheckpoint.manifestGeneration.
-	SandboxCheckpointManifestGenerationAnnotation = "agents.x-k8s.io/checkpoint-manifest-generation"
-	// SandboxCheckpointOperationIDAnnotation carries status.committedCheckpoint.operationID.
-	SandboxCheckpointOperationIDAnnotation = "agents.x-k8s.io/checkpoint-operation-id"
-	// SandboxCheckpointPlacementEpochAnnotation carries status.committedCheckpoint.placementEpoch.
-	SandboxCheckpointPlacementEpochAnnotation = "agents.x-k8s.io/checkpoint-placement-epoch"
 	// SandboxShutdownIntentAnnotation is an alpha, experimental annotation the
 	// controller sets on the execution Pod before it deletes that Pod for
 	// hibernation. Its value is SandboxShutdownIntentHibernate.
@@ -349,9 +347,10 @@ const (
 type SandboxDesiredLifecycle string
 
 const (
-	// SandboxDesiredLifecycleActive requests an executing Sandbox. When a previous
-	// execution exists, the controller creates a replacement Pod only after that
-	// execution is fenced and restores it from status.committedCheckpoint.
+	// SandboxDesiredLifecycleActive requests an executing Sandbox. The controller
+	// creates the first execution Pod. It does not yet create a replacement for a
+	// previous execution: after that execution is fenced, the Sandbox reports
+	// Ready=False with reason CheckpointRestoreUnsupported.
 	SandboxDesiredLifecycleActive SandboxDesiredLifecycle = "Active"
 	// SandboxDesiredLifecycleHibernated requests deep hibernation. The controller
 	// deletes the execution Pod only after a checkpoint of that execution is
@@ -476,10 +475,12 @@ type SandboxSpec struct {
 
 	// desiredLifecycle is an alpha, experimental field that opts the Sandbox into
 	// checkpoint-based deep hibernation:
-	//   - Active: the controller keeps one execution Pod. Each execution Pod holds a
-	//     placement epoch. A replacement for a previous execution is created only
-	//     after an external fencing owner reports the ExecutionFenced condition for
-	//     that execution, and it restores from status.committedCheckpoint.
+	//   - Active: the controller creates the first execution Pod, which holds
+	//     placement epoch 1. The controller does not yet create a replacement for a
+	//     previous execution, because no runtime restore contract is implemented.
+	//     It reports Ready=False with reason AwaitingExecutionFence until an
+	//     external fencing owner reports the ExecutionFenced condition for that
+	//     execution, and with reason CheckpointRestoreUnsupported afterwards.
 	//   - Hibernated: the controller deletes the execution Pod after a checkpoint of
 	//     that execution is committed to status.committedCheckpoint. Once that
 	//     checkpoint is committed, the controller finishes the shutdown even if

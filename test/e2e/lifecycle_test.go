@@ -68,10 +68,14 @@ func TestSandboxDesiredLifecycleValidation(t *testing.T) {
 	require.True(t, apierrors.IsInvalid(err), "desiredLifecycle must not be added after creation, got %v", err)
 }
 
-// TestSandboxHibernateAndFencedWake drives the experimental lifecycle through
-// a real apiserver. The test plays the runtime (checkpoint commit) and the
-// external fencing owner, which have no implementation in this repository.
-func TestSandboxHibernateAndFencedWake(t *testing.T) {
+// TestSandboxHibernateAndFencedWakeBookkeeping drives the controller
+// bookkeeping of the experimental lifecycle through a real apiserver. The test
+// plays the runtime (checkpoint commit) and the external fencing owner, which
+// have no implementation in this repository. The checkpoint is a synthetic
+// reference that nothing reads. The test does not exercise pause, checkpoint,
+// or restore, and the controller creates no replacement execution because no
+// runtime restore contract exists.
+func TestSandboxHibernateAndFencedWakeBookkeeping(t *testing.T) {
 	tc := framework.NewTestContext(t)
 	ns := lifecycleTestNamespace(t, tc)
 	ctx := t.Context()
@@ -145,15 +149,12 @@ func TestSandboxHibernateAndFencedWake(t *testing.T) {
 		return c.Status().Update(ctx, latest)
 	}))
 
-	tc.MustWaitForObject(sandbox, predicates.ReadyConditionIsTrue)
+	// The fenced wake is still blocked: no replacement can restore the checkpoint.
+	tc.MustWaitForObject(sandbox, predicates.ConditionReasonEquals(
+		string(sandboxv1beta1.SandboxConditionReady), sandboxv1beta1.SandboxReasonCheckpointRestoreUnsupported))
+	time.Sleep(3 * time.Second)
+	require.NoError(t, tc.ValidateObjectNotFound(ctx, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}}))
 	require.NoError(t, tc.Get(ctx, key, sandbox))
-	replacement := &corev1.Pod{}
-	require.NoError(t, tc.Get(ctx, key, replacement))
-	require.NotEqual(t, firstPod.UID, replacement.UID)
-	require.Equal(t, int64(2), sandbox.Status.PlacementEpoch)
-	require.Equal(t, string(replacement.UID), sandbox.Status.ExecutionPodUID)
-	require.Equal(t, "2", replacement.Annotations[sandboxv1beta1.SandboxPlacementEpochAnnotation])
-	require.Equal(t, checkpoint.ManifestURI, replacement.Annotations[sandboxv1beta1.SandboxCheckpointManifestURIAnnotation])
-	require.Equal(t, checkpoint.OperationID, replacement.Annotations[sandboxv1beta1.SandboxCheckpointOperationIDAnnotation])
-	require.Empty(t, replacement.Spec.SchedulingGates)
+	require.Equal(t, int64(1), sandbox.Status.PlacementEpoch)
+	require.Equal(t, string(firstPod.UID), sandbox.Status.ExecutionPodUID)
 }

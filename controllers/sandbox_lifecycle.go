@@ -112,8 +112,7 @@ func checkpointOfCurrentExecution(sandbox *sandboxv1beta1.Sandbox) bool {
 
 // executionPlacement is an authorized, not yet recorded, new execution.
 type executionPlacement struct {
-	epoch      int64
-	checkpoint *sandboxv1beta1.SandboxCheckpointReference
+	epoch int64
 }
 
 // applyTo stamps the placement on a Pod that is about to be created. The
@@ -130,21 +129,17 @@ func (p *executionPlacement) applyTo(pod *corev1.Pod) error {
 		pod.Annotations = map[string]string{}
 	}
 	pod.Annotations[sandboxv1beta1.SandboxPlacementEpochAnnotation] = strconv.FormatInt(p.epoch, 10)
-	if p.checkpoint != nil {
-		pod.Annotations[sandboxv1beta1.SandboxCheckpointManifestURIAnnotation] = p.checkpoint.ManifestURI
-		pod.Annotations[sandboxv1beta1.SandboxCheckpointManifestGenerationAnnotation] = strconv.FormatInt(p.checkpoint.ManifestGeneration, 10)
-		pod.Annotations[sandboxv1beta1.SandboxCheckpointOperationIDAnnotation] = p.checkpoint.OperationID
-		pod.Annotations[sandboxv1beta1.SandboxCheckpointPlacementEpochAnnotation] = strconv.FormatInt(p.checkpoint.PlacementEpoch, 10)
-	}
 	pod.Spec.SchedulingGates = append(pod.Spec.SchedulingGates, corev1.PodSchedulingGate{Name: sandboxv1beta1.SandboxPlacementSchedulingGate})
 	return nil
 }
 
 // authorizeExecutionPlacement decides whether the controller may create a new
-// execution Pod. It returns nil when creation must wait. A replacement for an
-// earlier execution requires a verified fence for that execution and a
-// committed checkpoint to restore from (DESIGN 5.3): the controller never
-// creates a successor early.
+// execution Pod. It returns nil when creation must wait. Only the first
+// execution is authorized. A replacement for an earlier execution would need a
+// verified fence for that execution (DESIGN 5.3) and a runtime that restores
+// the committed checkpoint behind the restore barrier (DESIGN 3.2). No such
+// runtime restore contract exists yet, so the controller never creates a
+// replacement and reports why instead.
 func (r *SandboxReconciler) authorizeExecutionPlacement(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) *executionPlacement {
 	logger := log.FromContext(ctx)
 	if sandbox.Spec.DesiredLifecycle != sandboxv1beta1.SandboxDesiredLifecycleActive {
@@ -170,7 +165,9 @@ func (r *SandboxReconciler) authorizeExecutionPlacement(ctx context.Context, san
 			"executionPodUID", status.ExecutionPodUID, "placementEpoch", status.PlacementEpoch)
 		return nil
 	}
-	return &executionPlacement{epoch: status.PlacementEpoch + 1, checkpoint: status.CommittedCheckpoint.DeepCopy()}
+	logger.V(4).Info("Refusing to place execution: checkpoint restore is not supported",
+		"checkpointOperationID", status.CommittedCheckpoint.OperationID, "placementEpoch", status.PlacementEpoch)
+	return nil
 }
 
 func (r *SandboxReconciler) recordAwaitingFenceEvent(sandbox *sandboxv1beta1.Sandbox) {
@@ -482,6 +479,11 @@ func lifecycleConditions(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (hibe
 		ready = readyOverride(sandboxv1beta1.SandboxReasonAwaitingExecutionFence,
 			fmt.Sprintf("waiting for the ExecutionFenced condition for execution Pod %q at placement epoch %d",
 				status.ExecutionPodUID, status.PlacementEpoch))
+	case pod == nil && desired == sandboxv1beta1.SandboxDesiredLifecycleActive &&
+		status.ExecutionPodUID != "" && status.CommittedCheckpoint != nil:
+		ready = readyOverride(sandboxv1beta1.SandboxReasonCheckpointRestoreUnsupported,
+			fmt.Sprintf("checkpoint operation %q is committed, but no runtime restore contract is implemented, so the controller creates no replacement execution Pod",
+				status.CommittedCheckpoint.OperationID))
 	}
 	return hibernated, recovery, ready
 }

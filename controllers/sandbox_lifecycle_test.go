@@ -215,7 +215,6 @@ func TestLifecycleFirstPlacementGatesPodUntilEpochIsRecorded(t *testing.T) {
 	require.NotNil(t, pod)
 	require.Equal(t, "1", pod.Annotations[sandboxv1beta1.SandboxPlacementEpochAnnotation])
 	require.True(t, hasPlacementSchedulingGate(pod))
-	require.NotContains(t, pod.Annotations, sandboxv1beta1.SandboxCheckpointManifestURIAnnotation)
 	sb := getLifecycleSandbox(t, r)
 	require.Equal(t, int64(1), sb.Status.PlacementEpoch)
 	require.Equal(t, string(pod.UID), sb.Status.ExecutionPodUID)
@@ -454,43 +453,27 @@ func TestLifecycleWakeBlockedWithoutFence(t *testing.T) {
 	}
 }
 
-func TestLifecycleWakeCreatesReplacementFromCheckpointAfterFence(t *testing.T) {
+func TestLifecycleWakeAfterFenceIsBlockedUntilRestoreIsSupported(t *testing.T) {
+	// The fence and the committed checkpoint are controller bookkeeping. No
+	// runtime restores the checkpoint, so the controller creates no
+	// replacement that could become Ready without restored state.
 	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-2", 2)
 	setFence(sb, "pod-2", 2)
 	r, _ := newLifecycleReconciler(t, nil, sb)
 
 	require.NoError(t, reconcileLifecycle(t, r))
+	require.NoError(t, reconcileLifecycle(t, r))
 
-	pod := getLifecyclePod(t, r)
-	require.NotNil(t, pod)
-	require.NotEqual(t, types.UID("pod-2"), pod.UID)
-	require.True(t, hasPlacementSchedulingGate(pod))
-	cp := sb.Status.CommittedCheckpoint
-	require.Equal(t, map[string]string{
-		sandboxv1beta1.SandboxPlacementEpochAnnotation:               "3",
-		sandboxv1beta1.SandboxCheckpointManifestURIAnnotation:        cp.ManifestURI,
-		sandboxv1beta1.SandboxCheckpointManifestGenerationAnnotation: fmt.Sprint(cp.ManifestGeneration),
-		sandboxv1beta1.SandboxCheckpointOperationIDAnnotation:        cp.OperationID,
-		sandboxv1beta1.SandboxCheckpointPlacementEpochAnnotation:     "2",
-	}, map[string]string{
-		sandboxv1beta1.SandboxPlacementEpochAnnotation:               pod.Annotations[sandboxv1beta1.SandboxPlacementEpochAnnotation],
-		sandboxv1beta1.SandboxCheckpointManifestURIAnnotation:        pod.Annotations[sandboxv1beta1.SandboxCheckpointManifestURIAnnotation],
-		sandboxv1beta1.SandboxCheckpointManifestGenerationAnnotation: pod.Annotations[sandboxv1beta1.SandboxCheckpointManifestGenerationAnnotation],
-		sandboxv1beta1.SandboxCheckpointOperationIDAnnotation:        pod.Annotations[sandboxv1beta1.SandboxCheckpointOperationIDAnnotation],
-		sandboxv1beta1.SandboxCheckpointPlacementEpochAnnotation:     pod.Annotations[sandboxv1beta1.SandboxCheckpointPlacementEpochAnnotation],
-	})
+	require.Nil(t, getLifecyclePod(t, r))
 	got := getLifecycleSandbox(t, r)
-	require.Equal(t, int64(3), got.Status.PlacementEpoch)
-	require.Equal(t, string(pod.UID), got.Status.ExecutionPodUID)
-
-	// The previous fence no longer matches, so losing this execution would
-	// again require a new fence.
-	require.False(t, previousExecutionFenced(got))
+	require.Equal(t, int64(2), got.Status.PlacementEpoch)
+	require.Equal(t, "pod-2", got.Status.ExecutionPodUID)
+	requireCondition(t, got, sandboxv1beta1.SandboxConditionReady, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonCheckpointRestoreUnsupported)
+	requireCondition(t, got, sandboxv1beta1.SandboxConditionRecoveryRequired, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonNoRecoveryRequired)
 }
 
-func TestLifecycleWakeDeletionDuringWakeLeavesNoSuccessor(t *testing.T) {
-	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-2", 2)
-	setFence(sb, "pod-2", 2)
+func TestLifecycleDeletionDuringPlacementLeavesNoExecution(t *testing.T) {
+	sb := lifecycleSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive)
 	deleteSandboxAfterPodCreate := func(ctx context.Context, c client.WithWatch, obj client.Object) error {
 		if _, ok := obj.(*corev1.Pod); !ok {
 			return nil
@@ -504,9 +487,8 @@ func TestLifecycleWakeDeletionDuringWakeLeavesNoSuccessor(t *testing.T) {
 	require.Nil(t, getLifecyclePod(t, r), "the gated Pod is deleted when its epoch cannot be recorded")
 }
 
-func TestLifecycleWakeConcurrentSandboxChangeRejectsPlacement(t *testing.T) {
-	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-2", 2)
-	setFence(sb, "pod-2", 2)
+func TestLifecycleConcurrentSandboxChangeRejectsPlacement(t *testing.T) {
+	sb := lifecycleSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive)
 	hibernateAgainAfterPodCreate := func(ctx context.Context, c client.WithWatch, obj client.Object) error {
 		if _, ok := obj.(*corev1.Pod); !ok {
 			return nil
@@ -525,8 +507,8 @@ func TestLifecycleWakeConcurrentSandboxChangeRejectsPlacement(t *testing.T) {
 	require.True(t, k8serrors.IsConflict(errors.Unwrap(err)) || k8serrors.IsConflict(err), "got %v", err)
 	require.Nil(t, getLifecyclePod(t, r))
 	got := getLifecycleSandbox(t, r)
-	require.Equal(t, int64(2), got.Status.PlacementEpoch, "epoch only changes through the conditional update")
-	require.Equal(t, "pod-2", got.Status.ExecutionPodUID)
+	require.Zero(t, got.Status.PlacementEpoch, "epoch only changes through the conditional update")
+	require.Empty(t, got.Status.ExecutionPodUID)
 }
 
 func TestLifecyclePlacementWriteWithLostResponseKeepsPod(t *testing.T) {
