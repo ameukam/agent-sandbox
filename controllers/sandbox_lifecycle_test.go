@@ -412,6 +412,51 @@ func TestLifecycleWakeConcurrentSandboxChangeRejectsPlacement(t *testing.T) {
 	require.Equal(t, "pod-2", got.Status.ExecutionPodUID)
 }
 
+func TestLifecyclePlacementWriteWithLostResponseKeepsPod(t *testing.T) {
+	// The apiserver applies the placement patch, but the response is lost.
+	// The controller must not treat the unknown outcome as a rejection.
+	r, _ := newLifecycleReconcilerWithFuncs(t, interceptor.Funcs{
+		Create: uidAssigningCreate(nil),
+		SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if err := c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...); err != nil {
+				return err
+			}
+			if sb, ok := obj.(*sandboxv1beta1.Sandbox); ok && sb.Status.PlacementEpoch == 1 && sb.Status.ExecutionPodUID != "" {
+				return k8serrors.NewTimeoutError("placement patch response lost", 1)
+			}
+			return nil
+		},
+	}, lifecycleSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive))
+
+	require.Error(t, reconcileLifecycle(t, r))
+
+	pod := getLifecyclePod(t, r)
+	require.NotNil(t, pod, "the gated Pod is kept while the placement outcome is unknown")
+	require.True(t, pod.DeletionTimestamp.IsZero())
+	got := getLifecycleSandbox(t, r)
+	require.Equal(t, int64(1), got.Status.PlacementEpoch)
+	require.Equal(t, string(pod.UID), got.Status.ExecutionPodUID, "the committed placement names the kept Pod")
+}
+
+func TestLifecycleStaleGatedPodIsNotDeletedAfterItChanged(t *testing.T) {
+	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-2", 2)
+	r, _ := newLifecycleReconciler(t, nil, sb, executionPod("pod-orphan", 3, true))
+	cached := getLifecyclePod(t, r)
+
+	// The live Pod lost its gate after the cache observed it.
+	live := cached.DeepCopy()
+	live.Spec.SchedulingGates = nil
+	require.NoError(t, r.Update(t.Context(), live))
+
+	handled, _, err := r.reconcileManagedExistingPod(t.Context(), getLifecycleSandbox(t, r), cached)
+	require.True(t, handled)
+	require.Error(t, err)
+	require.True(t, k8serrors.IsConflict(errors.Unwrap(err)), "got %v", err)
+	pod := getLifecyclePod(t, r)
+	require.NotNil(t, pod, "a Pod that may have started is kept as evidence")
+	require.True(t, pod.DeletionTimestamp.IsZero())
+}
+
 func TestLifecycleGatedPodWithUnrecordedPlacementIsDeleted(t *testing.T) {
 	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-2", 2)
 	r, _ := newLifecycleReconciler(t, nil, sb, executionPod("pod-orphan", 3, true))

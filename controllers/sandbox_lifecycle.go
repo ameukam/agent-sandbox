@@ -187,22 +187,32 @@ func (r *SandboxReconciler) recordAwaitingFenceEvent(sandbox *sandboxv1beta1.San
 }
 
 // recordExecutionPlacement stores the new epoch and execution Pod UID with a
-// resourceVersion-conditional status patch. If the Sandbox changed or was
-// deleted since the controller read it, the patch fails and the controller
-// deletes the still-gated Pod, which has never run.
+// resourceVersion-conditional status patch. When the apiserver rejects the
+// patch because the Sandbox changed or was deleted since the controller read
+// it, the controller deletes the still-gated Pod, which has never run. Any
+// other error leaves the outcome unknown, because the patch may have been
+// applied before its response was lost. The controller then keeps the Pod and
+// a later pass classifies it against the recorded placement.
 func (r *SandboxReconciler) recordExecutionPlacement(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, placement *executionPlacement) error {
+	logger := log.FromContext(ctx)
 	base := sandbox.DeepCopy()
 	updated := sandbox.DeepCopy()
 	updated.Status.PlacementEpoch = placement.epoch
 	updated.Status.ExecutionPodUID = string(pod.UID)
 	patch := client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
 	if err := r.Status().Patch(ctx, updated, patch); err != nil {
-		log.FromContext(ctx).Info("Placement epoch was not recorded; deleting the gated execution Pod",
-			"Pod.Name", pod.Name, "Pod.UID", pod.UID, "placementEpoch", placement.epoch, "error", err.Error())
-		if delErr := r.deleteExecutionPod(ctx, pod); delErr != nil {
-			return errors.Join(fmt.Errorf("failed to record placement epoch %d: %w", placement.epoch, err), delErr)
+		recordErr := fmt.Errorf("failed to record placement epoch %d: %w", placement.epoch, err)
+		if !k8serrors.IsConflict(err) && !k8serrors.IsNotFound(err) {
+			logger.Info("Placement epoch write has an unknown outcome; keeping the gated execution Pod",
+				"Pod.Name", pod.Name, "Pod.UID", pod.UID, "placementEpoch", placement.epoch, "error", err.Error())
+			return recordErr
 		}
-		return fmt.Errorf("failed to record placement epoch %d: %w", placement.epoch, err)
+		logger.Info("Placement epoch was not recorded; deleting the gated execution Pod",
+			"Pod.Name", pod.Name, "Pod.UID", pod.UID, "placementEpoch", placement.epoch, "error", err.Error())
+		if delErr := r.deleteNeverStartedPod(ctx, pod); delErr != nil {
+			return errors.Join(recordErr, delErr)
+		}
+		return recordErr
 	}
 	sandbox.ResourceVersion = updated.ResourceVersion
 	sandbox.Status.PlacementEpoch = updated.Status.PlacementEpoch
@@ -215,6 +225,23 @@ func (r *SandboxReconciler) deleteExecutionPod(ctx context.Context, pod *corev1.
 	uid := pod.UID
 	if err := r.Delete(ctx, pod, client.Preconditions{UID: &uid}); err != nil && !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete execution pod %q: %w", pod.Name, err)
+	}
+	return nil
+}
+
+// deleteNeverStartedPod deletes a Pod that the controller observed with its
+// placement scheduling gate. The resourceVersion precondition makes the
+// apiserver reject the deletion if the Pod changed after that observation,
+// for example because its gate was removed and it started. The controller
+// then keeps the Pod as evidence and a later pass re-classifies it.
+func (r *SandboxReconciler) deleteNeverStartedPod(ctx context.Context, pod *corev1.Pod) error {
+	if !hasPlacementSchedulingGate(pod) || pod.ResourceVersion == "" {
+		return fmt.Errorf("refusing to delete pod %q: no observed placement scheduling gate at a known resourceVersion", pod.Name)
+	}
+	uid, resourceVersion := pod.UID, pod.ResourceVersion
+	err := r.Delete(ctx, pod, client.Preconditions{UID: &uid, ResourceVersion: &resourceVersion})
+	if err != nil && !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete gated pod %q at resourceVersion %s: %w", pod.Name, resourceVersion, err)
 	}
 	return nil
 }
@@ -245,8 +272,8 @@ func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, san
 				}
 			}
 			logger.Info("Deleting gated Pod whose placement was not recorded",
-				"Pod.Name", pod.Name, "Pod.UID", pod.UID)
-			return true, 0, r.deleteExecutionPod(ctx, pod)
+				"Pod.Name", pod.Name, "Pod.UID", pod.UID, "Pod.ResourceVersion", pod.ResourceVersion)
+			return true, 0, r.deleteNeverStartedPod(ctx, pod)
 		}
 		// An unrecorded Pod that may have run is evidence; keep it and report
 		// RecoveryRequired instead of deleting or replacing it.
