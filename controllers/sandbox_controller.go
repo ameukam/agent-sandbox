@@ -296,6 +296,10 @@ func (m *lifecycleTimeMap) markError(key types.NamespacedName, uid types.UID) bo
 // SandboxReconciler reconciles a Sandbox object.
 type SandboxReconciler struct {
 	client.Client
+	// APIReader reads from the apiserver without the informer cache. The
+	// execution lifecycle uses it to confirm the current Sandbox authorization
+	// before it releases or deletes an execution Pod.
+	APIReader     client.Reader
 	Scheme        *runtime.Scheme
 	Recorder      events.EventRecorder
 	Tracer        asmetrics.Instrumenter

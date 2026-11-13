@@ -158,7 +158,7 @@ func newLifecycleReconcilerWithFuncs(t *testing.T, funcs interceptor.Funcs, objs
 	}
 	c := interceptor.NewClient(base, funcs)
 	recorder := events.NewFakeRecorder(10)
-	return &SandboxReconciler{Client: c, Scheme: Scheme, Recorder: recorder, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}, recorder
+	return &SandboxReconciler{Client: c, APIReader: c, Scheme: Scheme, Recorder: recorder, Tracer: asmetrics.NewNoOp(), ClusterDomain: "cluster.local"}, recorder
 }
 
 func reconcileLifecycle(t *testing.T, r *SandboxReconciler) error {
@@ -261,6 +261,60 @@ func TestLifecyclePreboundTemplateCreatesNoPod(t *testing.T) {
 	got := getLifecycleSandbox(t, r)
 	require.Zero(t, got.Status.PlacementEpoch)
 	require.Empty(t, got.Status.ExecutionPodUID)
+}
+
+func TestLifecycleGateNotReleasedAfterLiveSandboxRevokesExecution(t *testing.T) {
+	// Each case changes the Sandbox after the reconcile read it from the
+	// cache, between placement recording and gate release.
+	for name, change := range map[string]func(ctx context.Context, c client.Client) error{
+		"sandbox deleted": func(ctx context.Context, c client.Client) error {
+			return c.Delete(ctx, &sandboxv1beta1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: lifecycleSandboxName, Namespace: lifecycleNamespace}})
+		},
+		"sandbox deletion pending on a finalizer": func(ctx context.Context, c client.Client) error {
+			live := &sandboxv1beta1.Sandbox{}
+			if err := c.Get(ctx, lifecycleKey, live); err != nil {
+				return err
+			}
+			live.Finalizers = []string{"example.com/hold"}
+			if err := c.Update(ctx, live); err != nil {
+				return err
+			}
+			return c.Delete(ctx, live)
+		},
+		"sandbox desired hibernated": func(ctx context.Context, c client.Client) error {
+			live := &sandboxv1beta1.Sandbox{}
+			if err := c.Get(ctx, lifecycleKey, live); err != nil {
+				return err
+			}
+			live.Spec.DesiredLifecycle = sandboxv1beta1.SandboxDesiredLifecycleHibernated
+			return c.Update(ctx, live)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			sb := lifecycleSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive)
+			sb.Status.PlacementEpoch = 1
+			sb.Status.ExecutionPodUID = "pod-1"
+			changed := false
+			r, _ := newLifecycleReconcilerWithFuncs(t, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if err := c.Get(ctx, key, obj, opts...); err != nil {
+						return err
+					}
+					if _, ok := obj.(*sandboxv1beta1.Sandbox); ok && !changed {
+						changed = true
+						return change(ctx, c)
+					}
+					return nil
+				},
+			}, sb, executionPod("pod-1", 1, true))
+
+			_ = reconcileLifecycle(t, r)
+
+			pod := getLifecyclePod(t, r)
+			require.NotNil(t, pod)
+			require.True(t, hasPlacementSchedulingGate(pod), "the execution Pod stays gated")
+		})
+	}
 }
 
 func TestLifecycleHibernateKeepsPodUntilCheckpointCommitted(t *testing.T) {

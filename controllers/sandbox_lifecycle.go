@@ -246,6 +246,51 @@ func (r *SandboxReconciler) deleteNeverStartedPod(ctx context.Context, pod *core
 	return nil
 }
 
+// getLiveSandbox reads the Sandbox from the apiserver, bypassing the informer
+// cache. It returns nil if the Sandbox no longer exists or is a different
+// incarnation with the same name.
+func (r *SandboxReconciler) getLiveSandbox(ctx context.Context, sandbox *sandboxv1beta1.Sandbox) (*sandboxv1beta1.Sandbox, error) {
+	if r.APIReader == nil {
+		return nil, errors.New("the execution lifecycle requires an uncached APIReader")
+	}
+	live := &sandboxv1beta1.Sandbox{}
+	if err := r.APIReader.Get(ctx, client.ObjectKeyFromObject(sandbox), live); err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to read live sandbox %s/%s: %w", sandbox.Namespace, sandbox.Name, err)
+	}
+	if live.UID != sandbox.UID {
+		return nil, nil
+	}
+	return live, nil
+}
+
+// liveSandboxRecordsExecution reports whether the live Sandbox status names
+// pod as the execution holding the current placement epoch.
+func (r *SandboxReconciler) liveSandboxRecordsExecution(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (bool, error) {
+	live, err := r.getLiveSandbox(ctx, sandbox)
+	if err != nil || live == nil {
+		return false, err
+	}
+	return isCurrentExecutionPod(live, pod), nil
+}
+
+// liveSandboxAuthorizesExecution reports whether the live Sandbox still
+// authorizes pod to run: the Sandbox exists, is not being deleted, is desired
+// Active, and its status names pod as the current execution. The cached
+// Sandbox that the reconcile started from may predate a deletion or a
+// change of desiredLifecycle.
+func (r *SandboxReconciler) liveSandboxAuthorizesExecution(ctx context.Context, sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (bool, error) {
+	live, err := r.getLiveSandbox(ctx, sandbox)
+	if err != nil || live == nil {
+		return false, err
+	}
+	return live.DeletionTimestamp.IsZero() &&
+		live.Spec.DesiredLifecycle == sandboxv1beta1.SandboxDesiredLifecycleActive &&
+		isCurrentExecutionPod(live, pod), nil
+}
+
 // reconcileManagedExistingPod applies the execution lifecycle to an owned Pod.
 // It returns handled=false only for the current execution while the Sandbox is
 // Active, so the caller continues with ordinary Pod metadata reconciliation.
@@ -270,6 +315,15 @@ func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, san
 						"Pod.Name", pod.Name, "Pod.UID", pod.UID, "wait", wait)
 					return true, wait, nil
 				}
+				// The cached Sandbox can lag for longer than the grace period.
+				recorded, err := r.liveSandboxRecordsExecution(ctx, sandbox, pod)
+				if err != nil {
+					return true, 0, err
+				}
+				if recorded {
+					logger.Info("Keeping gated Pod whose placement the live Sandbox records", "Pod.Name", pod.Name, "Pod.UID", pod.UID)
+					return true, unrecordedPlacementGracePeriod, nil
+				}
 			}
 			logger.Info("Deleting gated Pod whose placement was not recorded",
 				"Pod.Name", pod.Name, "Pod.UID", pod.UID, "Pod.ResourceVersion", pod.ResourceVersion)
@@ -281,6 +335,22 @@ func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, san
 	}
 
 	if hasPlacementSchedulingGate(pod) {
+		if sandbox.Spec.DesiredLifecycle != sandboxv1beta1.SandboxDesiredLifecycleActive {
+			logger.V(4).Info("Keeping the execution Pod gated because the Sandbox is not desired Active", "Pod.Name", pod.Name)
+			return true, 0, nil
+		}
+		authorized, err := r.liveSandboxAuthorizesExecution(ctx, sandbox, pod)
+		if err != nil {
+			return true, 0, err
+		}
+		if !authorized {
+			logger.Info("Keeping the execution Pod gated because the live Sandbox no longer authorizes it",
+				"Pod.Name", pod.Name, "Pod.UID", pod.UID, "placementEpoch", sandbox.Status.PlacementEpoch)
+			return true, 0, nil
+		}
+		// The optimistic lock makes the patch fail if the Pod changed after
+		// it was read, for example because garbage collection of a deleted
+		// Sandbox started deleting it.
 		patch := client.MergeFromWithOptions(pod.DeepCopy(), client.MergeFromWithOptimisticLock{})
 		pod.Spec.SchedulingGates = slices.DeleteFunc(pod.Spec.SchedulingGates, func(g corev1.PodSchedulingGate) bool {
 			return g.Name == sandboxv1beta1.SandboxPlacementSchedulingGate
