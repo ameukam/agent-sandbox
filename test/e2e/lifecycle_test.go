@@ -116,11 +116,10 @@ func TestSandboxHibernateAndFencedWake(t *testing.T) {
 		return controllers.CommitCheckpoint(ctx, c, key, controllers.CheckpointCommit{SandboxUID: sandbox.UID, SandboxGeneration: sandbox.Generation, Checkpoint: checkpoint})
 	}))
 
+	// Pod absence alone does not establish Hibernated.
 	require.NoError(t, tc.WaitForObjectNotFound(ctx, firstPod))
 	tc.MustWaitForObject(sandbox, predicates.ConditionReasonEquals(
-		string(sandboxv1beta1.SandboxConditionHibernated), sandboxv1beta1.SandboxReasonCheckpointCommitted))
-	tc.MustWaitForObject(sandbox, predicates.ConditionReasonEquals(
-		string(sandboxv1beta1.SandboxConditionReady), sandboxv1beta1.SandboxReasonHibernated))
+		string(sandboxv1beta1.SandboxConditionHibernated), sandboxv1beta1.SandboxReasonAwaitingExecutionTermination))
 
 	// Wake without a fence stays blocked and creates no successor.
 	framework.MustUpdateObject(tc.ClusterClient, sandbox, func(obj *sandboxv1beta1.Sandbox) {

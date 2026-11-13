@@ -144,10 +144,11 @@ const (
 
 	// SandboxConditionHibernated is an alpha, experimental condition that the
 	// controller sets only when spec.desiredLifecycle is set. Status is True when
-	// desiredLifecycle is Hibernated, no execution Pod exists, and
-	// status.committedCheckpoint belongs to the most recent execution (reason
+	// desiredLifecycle is Hibernated, no execution Pod exists,
+	// status.committedCheckpoint belongs to the most recent execution, and the
+	// ExecutionFenced condition confirms that execution stopped (reason
 	// CheckpointCommitted). Otherwise Status is False with reason NotHibernated,
-	// AwaitingCheckpoint, or PodTerminating.
+	// AwaitingCheckpoint, AwaitingExecutionTermination, or PodTerminating.
 	SandboxConditionHibernated ConditionType = "Hibernated"
 	// SandboxReasonCheckpointCommitted is the Hibernated=True reason.
 	SandboxReasonCheckpointCommitted = "CheckpointCommitted"
@@ -157,6 +158,10 @@ const (
 	// checkpoint for the most recent execution exists yet, so the controller keeps
 	// the execution Pod.
 	SandboxReasonAwaitingCheckpoint = "AwaitingCheckpoint"
+	// SandboxReasonAwaitingExecutionTermination is a Hibernated=False reason: the
+	// checkpoint is committed and the execution Pod is gone, but the
+	// ExecutionFenced condition does not yet confirm that the execution stopped.
+	SandboxReasonAwaitingExecutionTermination = "AwaitingExecutionTermination"
 
 	// SandboxConditionRecoveryRequired is an alpha, experimental condition that the
 	// controller sets only when spec.desiredLifecycle is set. Status is True when

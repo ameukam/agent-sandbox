@@ -348,8 +348,15 @@ func TestLifecycleHibernateRecordsShutdownIntentBeforeDeletingPod(t *testing.T) 
 	require.Nil(t, getLifecyclePod(t, r))
 	require.Contains(t, drainEvents(recorder), eventReasonExecutionPodRemoved)
 
+	// Pod absence alone does not show that the execution stopped.
 	require.NoError(t, reconcileLifecycle(t, r))
 	got := getLifecycleSandbox(t, r)
+	requireCondition(t, got, sandboxv1beta1.SandboxConditionHibernated, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonAwaitingExecutionTermination)
+
+	setFence(got, "pod-1", 1)
+	require.NoError(t, r.Status().Update(t.Context(), got))
+	require.NoError(t, reconcileLifecycle(t, r))
+	got = getLifecycleSandbox(t, r)
 	requireCondition(t, got, sandboxv1beta1.SandboxConditionHibernated, metav1.ConditionTrue, sandboxv1beta1.SandboxReasonCheckpointCommitted)
 	requireCondition(t, got, sandboxv1beta1.SandboxConditionReady, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonHibernated)
 	require.Equal(t, "pod-1", got.Status.ExecutionPodUID, "the removed execution stays recorded for fencing")
@@ -387,6 +394,29 @@ func TestLifecycleCommittedGatedPodIsNotReleased(t *testing.T) {
 	pod := getLifecyclePod(t, r)
 	require.NotNil(t, pod)
 	require.True(t, hasPlacementSchedulingGate(pod))
+}
+
+func TestLifecycleHibernatedRequiresMatchingFence(t *testing.T) {
+	for name, fence := range map[string]func(*sandboxv1beta1.Sandbox){
+		"source state unknown": func(*sandboxv1beta1.Sandbox) {},
+		"fence for an older execution": func(sb *sandboxv1beta1.Sandbox) {
+			setFence(sb, "pod-1", 1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The checkpoint of pod-2 is committed and the Pod object is gone,
+			// for example after a forced deletion during a partition.
+			sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleHibernated, "pod-2", 2)
+			fence(sb)
+			r, _ := newLifecycleReconciler(t, nil, sb)
+
+			require.NoError(t, reconcileLifecycle(t, r))
+
+			got := getLifecycleSandbox(t, r)
+			requireCondition(t, got, sandboxv1beta1.SandboxConditionHibernated, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonAwaitingExecutionTermination)
+			require.Nil(t, getLifecyclePod(t, r))
+		})
+	}
 }
 
 func TestLifecycleWakeBlockedWithoutFence(t *testing.T) {

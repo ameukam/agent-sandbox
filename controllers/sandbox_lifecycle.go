@@ -446,6 +446,12 @@ func lifecycleConditions(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (hibe
 			hibernated.Reason = sandboxv1beta1.SandboxReasonPodTerminating
 		case ownedPod || !checkpointOfCurrentExecution(sandbox):
 			hibernated.Reason = sandboxv1beta1.SandboxReasonAwaitingCheckpoint
+		case !previousExecutionFenced(sandbox):
+			// A missing Pod object does not prove that its execution stopped,
+			// for example after a forced deletion during a partition.
+			hibernated.Reason = sandboxv1beta1.SandboxReasonAwaitingExecutionTermination
+			hibernated.Message = fmt.Sprintf("waiting for the ExecutionFenced condition for execution Pod %q at placement epoch %d",
+				status.ExecutionPodUID, status.PlacementEpoch)
 		default:
 			hibernated.Status = metav1.ConditionTrue
 			hibernated.Reason = sandboxv1beta1.SandboxReasonCheckpointCommitted
