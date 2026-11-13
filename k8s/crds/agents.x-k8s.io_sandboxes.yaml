@@ -38,6 +38,11 @@ spec:
             type: object
           spec:
             properties:
+              desiredLifecycle:
+                enum:
+                - Active
+                - Hibernated
+                type: string
               failedPodPolicy:
                 default: Retain
                 enum:
@@ -4106,8 +4111,46 @@ spec:
               rule: has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates)
                 && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates ==
                 oldSelf.volumeClaimTemplates)
+            - message: desiredLifecycle can only be set when the Sandbox is created
+                and cannot be removed
+              rule: has(self.desiredLifecycle) == has(oldSelf.desiredLifecycle)
+            - message: desiredLifecycle requires operatingMode Running
+              rule: '!has(self.desiredLifecycle) || !has(self.operatingMode) || self.operatingMode
+                == ''Running'''
+            - message: desiredLifecycle requires failedPodPolicy Retain
+              rule: '!has(self.desiredLifecycle) || !has(self.failedPodPolicy) ||
+                self.failedPodPolicy == ''Retain'''
           status:
             properties:
+              committedCheckpoint:
+                properties:
+                  manifestGeneration:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  manifestURI:
+                    maxLength: 2048
+                    minLength: 1
+                    type: string
+                  operationID:
+                    maxLength: 253
+                    minLength: 1
+                    type: string
+                  placementEpoch:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  sourcePodUID:
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - manifestGeneration
+                - manifestURI
+                - operationID
+                - placementEpoch
+                - sourcePodUID
+                type: object
               conditions:
                 items:
                   properties:
@@ -4144,8 +4187,29 @@ spec:
                   - type
                   type: object
                 type: array
+              executionPodUID:
+                maxLength: 128
+                type: string
+              fencedExecution:
+                properties:
+                  placementEpoch:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  podUID:
+                    maxLength: 128
+                    minLength: 1
+                    type: string
+                required:
+                - placementEpoch
+                - podUID
+                type: object
               nodeName:
                 type: string
+              placementEpoch:
+                format: int64
+                minimum: 0
+                type: integer
               podIPs:
                 items:
                   type: string

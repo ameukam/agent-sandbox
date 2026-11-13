@@ -173,6 +173,65 @@ _Appears in:_
 | `failedPodPolicy` _[FailedPodPolicy](#failedpodpolicy)_ | failedPodPolicy controls what happens when the backing Pod enters phase Failed.<br />Retain (default): leave the Failed pod and surface Finished=True.<br />Recreate: delete the controller-owned Failed pod so a new one is created;<br />the Sandbox identity and any Sandbox-owned PVCs are retained.<br />Combined with restartPolicy Never and a container that always exits non-zero,<br />Recreate can recreate the Pod repeatedly; the controller applies Deployment-style<br />in-memory exponential backoff (5s, doubling up to 5m) between creates so a crash<br />loop cannot hot-loop the API server. Backoff resets after the replacement Pod has<br />been continuously observed Running for 10 minutes. Backoff state is not persisted<br />in status. | Retain | Enum: [Retain Recreate] <br />Optional: \{\} <br /> |
 
 
+#### SandboxCheckpointReference
+
+
+
+SandboxCheckpointReference is an alpha, experimental reference to a committed
+checkpoint manifest. It records ownership and discovery, not proof that the
+checkpoint bytes are durable.
+
+
+
+_Appears in:_
+- [SandboxStatus](#sandboxstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `manifestURI` _string_ | manifestURI is the URI of the immutable checkpoint manifest object. |  | MaxLength: 2048 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `manifestGeneration` _integer_ | manifestGeneration is the object generation of the manifest at manifestURI. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `operationID` _string_ | operationID identifies the runtime checkpoint operation that produced the manifest. |  | MaxLength: 253 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `placementEpoch` _integer_ | placementEpoch is the placement epoch of the execution that produced the checkpoint. |  | Minimum: 1 <br />Required: \{\} <br /> |
+| `sourcePodUID` _string_ | sourcePodUID is the UID of the execution Pod that produced the checkpoint. |  | MaxLength: 128 <br />MinLength: 1 <br />Required: \{\} <br /> |
+
+
+#### SandboxDesiredLifecycle
+
+_Underlying type:_ _string_
+
+SandboxDesiredLifecycle is the alpha, experimental desired hibernation state
+of a Sandbox.
+
+_Validation:_
+- Enum: [Active Hibernated]
+
+_Appears in:_
+- [SandboxSpec](#sandboxspec)
+
+| Field | Description |
+| --- | --- |
+| `Active` | SandboxDesiredLifecycleActive requests an executing Sandbox. When a previous<br />execution exists, the controller creates a replacement Pod only after that<br />execution is fenced and restores it from status.committedCheckpoint.<br /> |
+| `Hibernated` | SandboxDesiredLifecycleHibernated requests deep hibernation. The controller<br />deletes the execution Pod only after a checkpoint of that execution is<br />committed and the shutdown intent is recorded on the Pod.<br /> |
+
+
+#### SandboxExecutionIdentity
+
+
+
+SandboxExecutionIdentity is an alpha, experimental identifier of one execution
+of a Sandbox.
+
+
+
+_Appears in:_
+- [SandboxStatus](#sandboxstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `podUID` _string_ | podUID is the UID of the execution Pod. |  | MaxLength: 128 <br />MinLength: 1 <br />Required: \{\} <br /> |
+| `placementEpoch` _integer_ | placementEpoch is the placement epoch that the execution Pod held. |  | Minimum: 1 <br />Required: \{\} <br /> |
+
+
 #### SandboxOperatingMode
 
 _Underlying type:_ _string_
@@ -216,6 +275,7 @@ _Appears in:_
 | `shutdownTime` _[Time](https://kubernetes.io/docs/reference/generated/kubernetes-api/v/#time-v1-meta)_ | shutdownTime is the absolute time at which the Sandbox expires. When the current<br />time reaches shutdownTime, the controller tears down the underlying resources<br />(Pod and Service) and then applies shutdownPolicy to the Sandbox object itself.<br />If unset, the Sandbox never expires and lives until it is explicitly deleted. |  | Format: date-time <br />Optional: \{\} <br /> |
 | `shutdownPolicy` _[ShutdownPolicy](#shutdownpolicy)_ | shutdownPolicy determines what happens to the Sandbox object itself when it expires<br />(i.e. when shutdownTime is reached). The underlying resources (Pod, Service) are<br />always deleted on expiry regardless of this policy; shutdownPolicy governs only the<br />Sandbox object:<br />  - Retain (default): the Sandbox object is kept after its resources are torn down.<br />    Its live status fields are cleared and a Ready=False condition with reason<br />    SandboxExpired is set so the expiry is observable.<br />  - Delete: the Sandbox object is deleted once its underlying resources are removed.<br />This field has no effect while shutdownTime is unset, since the Sandbox never expires. | Retain | Enum: [Delete Retain] <br />Optional: \{\} <br /> |
 | `operatingMode` _[SandboxOperatingMode](#sandboxoperatingmode)_ | operatingMode specifies the desired operational state of the Sandbox:<br />  - Running (default): the controller keeps a backing Pod running.<br />  - Suspended: the controller terminates the backing Pod but retains the<br />    Sandbox object and its volumes so it can later be resumed. Resuming creates a new<br />    Pod from the current podTemplate that reattaches the retained volumes.<br />This field declares intent only. The observed readiness of the Sandbox is<br />reported by the Ready condition, and the progress of a suspension by the<br />Suspended condition; a Sandbox in Running mode is not Ready until its Pod is<br />actually up (see SandboxConditionReady).<br />Defaults to Running if not specified. | Running | Enum: [Running Suspended] <br />Optional: \{\} <br /> |
+| `desiredLifecycle` _[SandboxDesiredLifecycle](#sandboxdesiredlifecycle)_ | desiredLifecycle is an alpha, experimental field that opts the Sandbox into<br />checkpoint-based deep hibernation:<br />  - Active: the controller keeps one execution Pod. Each execution Pod holds a<br />    placement epoch. A replacement for a previous execution is created only<br />    after an external fencing owner reports the ExecutionFenced condition for<br />    that execution, and it restores from status.committedCheckpoint.<br />  - Hibernated: the controller deletes the execution Pod after a checkpoint of<br />    that execution is committed to status.committedCheckpoint.<br />When unset, the controller does not manage placement epochs or checkpoints.<br />This field can only be set when the Sandbox is created. It requires<br />operatingMode Running and failedPodPolicy Retain, because both alternatives<br />would end or replace an execution without a committed checkpoint or fence. |  | Enum: [Active Hibernated] <br />Optional: \{\} <br /> |
 
 
 #### SandboxStatus
@@ -237,6 +297,10 @@ _Appears in:_
 | `selector` _string_ | selector is the label selector for pods. |  | Optional: \{\} <br /> |
 | `podIPs` _string array_ | podIPs are the IP addresses of the underlying pod.<br />A pod may have multiple IPs in dual-stack clusters.<br />This field is populated only while a backing pod exists. It is cleared whenever<br />the pod is absent, for example when the Sandbox is suspended<br />(operatingMode: Suspended) or before the pod has been created. |  | Optional: \{\} <br /> |
 | `nodeName` _string_ | nodeName is the name of the node where the underlying pod is scheduled.<br />Like podIPs, it is cleared whenever the pod is absent (e.g. while suspended). |  | Optional: \{\} <br /> |
+| `placementEpoch` _integer_ | placementEpoch is an alpha, experimental counter of execution placements.<br />The controller increments it with a resourceVersion-conditional update each<br />time it authorizes a new execution Pod. It is set only when<br />spec.desiredLifecycle is set. |  | Minimum: 0 <br />Optional: \{\} <br /> |
+| `executionPodUID` _string_ | executionPodUID is an alpha, experimental field that names the execution Pod<br />holding placementEpoch. It stays set after that Pod is deleted, so the<br />fencing owner and the next wake know which execution must be fenced. |  | MaxLength: 128 <br />Optional: \{\} <br /> |
+| `committedCheckpoint` _[SandboxCheckpointReference](#sandboxcheckpointreference)_ | committedCheckpoint is an alpha, experimental reference to the most recent<br />committed checkpoint. The controller adopts a checkpoint only when the<br />Sandbox UID, placementEpoch, executionPodUID, and desiredLifecycle Hibernated<br />still match the checkpoint operation. |  | Optional: \{\} <br /> |
+| `fencedExecution` _[SandboxExecutionIdentity](#sandboxexecutionidentity)_ | fencedExecution is an alpha, experimental field that an external fencing<br />owner sets together with the ExecutionFenced condition. It names the<br />execution that the fencing owner verified can no longer run or write. |  | Optional: \{\} <br /> |
 
 
 #### ShutdownPolicy

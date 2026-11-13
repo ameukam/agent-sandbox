@@ -2499,9 +2499,46 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxStatus
       default: {}
+- name: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxCheckpointReference
+  map:
+    fields:
+    - name: manifestGeneration
+      type:
+        scalar: numeric
+      default: 0
+    - name: manifestURI
+      type:
+        scalar: string
+      default: ""
+    - name: operationID
+      type:
+        scalar: string
+      default: ""
+    - name: placementEpoch
+      type:
+        scalar: numeric
+      default: 0
+    - name: sourcePodUID
+      type:
+        scalar: string
+      default: ""
+- name: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxExecutionIdentity
+  map:
+    fields:
+    - name: placementEpoch
+      type:
+        scalar: numeric
+      default: 0
+    - name: podUID
+      type:
+        scalar: string
+      default: ""
 - name: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxSpec
   map:
     fields:
+    - name: desiredLifecycle
+      type:
+        scalar: string
     - name: failedPodPolicy
       type:
         scalar: string
@@ -2530,15 +2567,27 @@ var schemaYAML = typed.YAMLObject(`types:
 - name: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxStatus
   map:
     fields:
+    - name: committedCheckpoint
+      type:
+        namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxCheckpointReference
     - name: conditions
       type:
         list:
           elementType:
             namedType: Condition.v1.meta.apis.pkg.apimachinery.k8s.io
           elementRelationship: atomic
+    - name: executionPodUID
+      type:
+        scalar: string
+    - name: fencedExecution
+      type:
+        namedType: io.k8s.sigs.agent-sandbox.api.v1beta1.SandboxExecutionIdentity
     - name: nodeName
       type:
         scalar: string
+    - name: placementEpoch
+      type:
+        scalar: numeric
     - name: podIPs
       type:
         list:

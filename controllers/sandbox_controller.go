@@ -90,8 +90,9 @@ const (
 //   - metadata.finalizers: never read on Pods by any controller in this repo
 //     (the sandboxes/finalizers RBAC is for the Sandbox CR itself, not Pods).
 //     Stripping is safe and saves a trivial amount of memory.
-//   - spec: the only spec field any controller reads is spec.nodeName
-//     (propagated to Sandbox status), so it is the only field preserved. The
+//   - spec: the only spec fields any controller reads are spec.nodeName
+//     (propagated to Sandbox status) and spec.schedulingGates (the execution
+//     lifecycle's placement gate), so they are the only fields preserved. The
 //     pod spec the controller WRITES is built from the Sandbox's PodTemplate
 //     (reconcilePod's create path), never from the cached pod, and every pod write in this
 //     repo is a metadata-only merge patch diffed against the same transformed
@@ -109,7 +110,7 @@ func PodCacheTransform(obj any) (any, error) {
 	}
 	pod.ManagedFields = nil
 	pod.Finalizers = nil
-	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName}
+	pod.Spec = corev1.PodSpec{NodeName: pod.Spec.NodeName, SchedulingGates: pod.Spec.SchedulingGates}
 	return pod, nil
 }
 
@@ -549,7 +550,8 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 		sandbox.Status.NodeName = ""
 	} else {
 		sandbox.Status.LabelSelector = sandboxv1beta1.SandboxNameHashLabel + "=" + nameHash
-		if isOwnedBySandbox(pod, sandbox) {
+		// A lifecycle-managed Sandbox publishes only its current execution.
+		if isOwnedBySandbox(pod, sandbox) && (!lifecycleManaged(sandbox) || isCurrentExecutionPod(sandbox, pod)) {
 			sandbox.Status.PodIPs = podIPsFromStatus(pod.Status.PodIPs)
 			sandbox.Status.NodeName = pod.Spec.NodeName
 		} else {
@@ -569,6 +571,17 @@ func (r *SandboxReconciler) reconcileChildResources(ctx context.Context, sandbox
 
 	// compute and set overall conditions
 	conditions := r.computeConditions(sandbox, conditionErrors, svc, pod, podErr)
+	if lifecycleManaged(sandbox) && podErr == nil {
+		hibernated, recovery, ready := lifecycleConditions(sandbox, pod)
+		conditions = append(conditions, hibernated, recovery)
+		if ready != nil && conditionErrors == nil {
+			for i := range conditions {
+				if conditions[i].Type == ready.Type {
+					conditions[i] = *ready
+				}
+			}
+		}
+	}
 	// Conditions that are only present while they apply: Finished has no
 	// meaning without a terminal pod, PodScheduled none without a pod at
 	// all. Any of these not computed this pass is removed from status.
@@ -1668,8 +1681,10 @@ func (r *SandboxReconciler) clearServiceStatus(sandbox *sandboxv1beta1.Sandbox) 
 	sandbox.Status.ServiceFQDN = ""
 }
 
+// sandboxRecreatesFailedPods is false for lifecycle-managed Sandboxes even if
+// validation was bypassed: a recreated Pod would be an unfenced successor.
 func sandboxRecreatesFailedPods(sandbox *sandboxv1beta1.Sandbox) bool {
-	return sandbox != nil && sandbox.Spec.FailedPodPolicy == sandboxv1beta1.FailedPodPolicyRecreate
+	return sandbox != nil && sandbox.Spec.FailedPodPolicy == sandboxv1beta1.FailedPodPolicyRecreate && !lifecycleManaged(sandbox)
 }
 
 func (r *SandboxReconciler) recordRecreateBackoffEvent(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod, delay time.Duration) {
@@ -1750,7 +1765,16 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		pod = ownedPods[0].DeepCopy()
 	}
 
-	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended {
+	// The execution lifecycle owns Pod deletion and replacement for Sandboxes
+	// that opted in; operatingMode does not apply to them.
+	if lifecycleManaged(sandbox) && pod != nil {
+		handled, err := r.reconcileManagedExistingPod(ctx, sandbox, pod)
+		if err != nil || handled {
+			return pod, 0, err
+		}
+	}
+
+	if sandbox.Spec.OperatingMode == sandboxv1beta1.SandboxOperatingModeSuspended && !lifecycleManaged(sandbox) {
 		if pod != nil {
 			ownership, controllerRef := checkOwnership(pod, sandbox)
 			switch ownership {
@@ -1959,6 +1983,13 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		}
 	}
 
+	var placement *executionPlacement
+	if lifecycleManaged(sandbox) {
+		if placement = r.authorizeExecutionPlacement(ctx, sandbox); placement == nil {
+			return nil, 0, nil
+		}
+	}
+
 	// Create new Pod
 	logger.Info("Creating a new Pod", "Pod.Namespace", sandbox.Namespace, "Pod.Name", sandbox.Name)
 	podLabels := make(map[string]string, len(sandbox.Spec.PodTemplate.ObjectMeta.Labels)+1)
@@ -2034,10 +2065,18 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 		Spec: *mutatedSpec,
 	}
 	pod.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("Pod"))
+	if placement != nil {
+		placement.applyTo(pod)
+	}
 	if err := ctrl.SetControllerReference(sandbox, pod, r.Scheme); err != nil {
 		return nil, 0, fmt.Errorf("SetControllerReference for Pod failed: %w", err)
 	}
 	if err := r.Create(ctx, pod, client.FieldOwner(sandboxControllerFieldOwner)); err != nil {
+		if k8serrors.IsAlreadyExists(err) && placement != nil {
+			// The cache has not observed an existing Pod yet; a later pass
+			// classifies it against the recorded placement.
+			return nil, 0, fmt.Errorf("execution pod %q already exists: %w", pod.Name, err)
+		}
 		if k8serrors.IsAlreadyExists(err) {
 			logger.Info("Pod already exists, fetching existing pod",
 				"Pod.Namespace", pod.Namespace, "Pod.Name", pod.Name)
@@ -2052,6 +2091,12 @@ func (r *SandboxReconciler) reconcilePod(ctx context.Context, sandbox *sandboxv1
 			r.Recorder.Eventf(sandbox, nil, corev1.EventTypeWarning, eventReasonSandboxPodCreateFailed, "PodCreation", "Failed to create Pod %q: %s", pod.Name, err.Error())
 		}
 		return nil, 0, err
+	}
+
+	if placement != nil {
+		if err := r.recordExecutionPlacement(ctx, sandbox, pod, placement); err != nil {
+			return nil, 0, err
+		}
 	}
 
 	if r.Recorder != nil {

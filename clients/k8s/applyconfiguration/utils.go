@@ -44,6 +44,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &apiv1beta1.SandboxApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("SandboxBlueprint"):
 		return &apiv1beta1.SandboxBlueprintApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("SandboxCheckpointReference"):
+		return &apiv1beta1.SandboxCheckpointReferenceApplyConfiguration{}
+	case v1beta1.SchemeGroupVersion.WithKind("SandboxExecutionIdentity"):
+		return &apiv1beta1.SandboxExecutionIdentityApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("SandboxSpec"):
 		return &apiv1beta1.SandboxSpecApplyConfiguration{}
 	case v1beta1.SchemeGroupVersion.WithKind("SandboxStatus"):

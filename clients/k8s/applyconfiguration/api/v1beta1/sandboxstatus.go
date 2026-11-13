@@ -46,6 +46,24 @@ type SandboxStatusApplyConfiguration struct {
 	// nodeName is the name of the node where the underlying pod is scheduled.
 	// Like podIPs, it is cleared whenever the pod is absent (e.g. while suspended).
 	NodeName *string `json:"nodeName,omitempty"`
+	// placementEpoch is an alpha, experimental counter of execution placements.
+	// The controller increments it with a resourceVersion-conditional update each
+	// time it authorizes a new execution Pod. It is set only when
+	// spec.desiredLifecycle is set.
+	PlacementEpoch *int64 `json:"placementEpoch,omitempty"`
+	// executionPodUID is an alpha, experimental field that names the execution Pod
+	// holding placementEpoch. It stays set after that Pod is deleted, so the
+	// fencing owner and the next wake know which execution must be fenced.
+	ExecutionPodUID *string `json:"executionPodUID,omitempty"`
+	// committedCheckpoint is an alpha, experimental reference to the most recent
+	// committed checkpoint. The controller adopts a checkpoint only when the
+	// Sandbox UID, placementEpoch, executionPodUID, and desiredLifecycle Hibernated
+	// still match the checkpoint operation.
+	CommittedCheckpoint *SandboxCheckpointReferenceApplyConfiguration `json:"committedCheckpoint,omitempty"`
+	// fencedExecution is an alpha, experimental field that an external fencing
+	// owner sets together with the ExecutionFenced condition. It names the
+	// execution that the fencing owner verified can no longer run or write.
+	FencedExecution *SandboxExecutionIdentityApplyConfiguration `json:"fencedExecution,omitempty"`
 }
 
 // SandboxStatusApplyConfiguration constructs a declarative configuration of the SandboxStatus type for use with
@@ -106,5 +124,37 @@ func (b *SandboxStatusApplyConfiguration) WithPodIPs(values ...string) *SandboxS
 // If called multiple times, the NodeName field is set to the value of the last call.
 func (b *SandboxStatusApplyConfiguration) WithNodeName(value string) *SandboxStatusApplyConfiguration {
 	b.NodeName = &value
+	return b
+}
+
+// WithPlacementEpoch sets the PlacementEpoch field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PlacementEpoch field is set to the value of the last call.
+func (b *SandboxStatusApplyConfiguration) WithPlacementEpoch(value int64) *SandboxStatusApplyConfiguration {
+	b.PlacementEpoch = &value
+	return b
+}
+
+// WithExecutionPodUID sets the ExecutionPodUID field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ExecutionPodUID field is set to the value of the last call.
+func (b *SandboxStatusApplyConfiguration) WithExecutionPodUID(value string) *SandboxStatusApplyConfiguration {
+	b.ExecutionPodUID = &value
+	return b
+}
+
+// WithCommittedCheckpoint sets the CommittedCheckpoint field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the CommittedCheckpoint field is set to the value of the last call.
+func (b *SandboxStatusApplyConfiguration) WithCommittedCheckpoint(value *SandboxCheckpointReferenceApplyConfiguration) *SandboxStatusApplyConfiguration {
+	b.CommittedCheckpoint = value
+	return b
+}
+
+// WithFencedExecution sets the FencedExecution field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the FencedExecution field is set to the value of the last call.
+func (b *SandboxStatusApplyConfiguration) WithFencedExecution(value *SandboxExecutionIdentityApplyConfiguration) *SandboxStatusApplyConfiguration {
+	b.FencedExecution = value
 	return b
 }
