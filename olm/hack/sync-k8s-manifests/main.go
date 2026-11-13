@@ -239,6 +239,7 @@ func rewriteRouterNamespace(dir, namespace string) error {
 	excludeFromResources := map[string]bool{
 		"kustomization.yaml":    true,
 		"rbac-tokenreview.yaml": true,
+		"rbac-wake.yaml":        true,
 	}
 	resources := make([]string, 0, len(entries))
 	for _, e := range entries {

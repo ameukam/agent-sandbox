@@ -45,6 +45,7 @@ func TestRewriteRouterNamespaceResourceList(t *testing.T) {
 		"service.yaml",
 		"networkpolicy.yaml",
 		"rbac-tokenreview.yaml",
+		"rbac-wake.yaml",
 	} {
 		body := "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n  namespace: default\n"
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
@@ -71,7 +72,9 @@ func TestRewriteRouterNamespaceResourceList(t *testing.T) {
 	// generated resource list: it grants system:auth-delegator, which is
 	// only needed when --authz-mode=tokenreview. networkpolicy.yaml is
 	// included — the OLM default ships a working policy.
-	if strings.Contains(text, "rbac-tokenreview.yaml") {
+	// rbac-wake.yaml likewise grants Sandbox writes that only the
+	// experimental --wake-enabled path needs.
+	if strings.Contains(text, "rbac-tokenreview.yaml") || strings.Contains(text, "rbac-wake.yaml") {
 		t.Fatalf("kustomization.yaml included excluded resources:\n%s", text)
 	}
 	if strings.Contains(text, "images:") {

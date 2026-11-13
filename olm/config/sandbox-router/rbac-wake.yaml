@@ -1,0 +1,43 @@
+# Extra RBAC for the alpha, experimental --wake-enabled path.
+#
+# A wake request reads the Sandbox, sets spec.desiredLifecycle to Active
+# with a UID- and resourceVersion-conditional merge patch, and reads the
+# execution Pod to confirm that it is the current, ready execution. The
+# Pod read is already granted by rbac.yaml; it is repeated here so this
+# grant stands on its own.
+#
+# Apply this file alongside rbac.yaml ONLY when running the router with
+# --wake-enabled. Without it, the router never writes Sandboxes.
+#
+#   kubectl apply -f sandbox-router/deploy/rbac.yaml
+#   kubectl apply -f sandbox-router/deploy/rbac-wake.yaml  # only when wake is on
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-router-wake
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+rules:
+- apiGroups: ["agents.x-k8s.io"]
+  resources: ["sandboxes"]
+  verbs: ["get", "patch"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-router-wake
+  labels:
+    app.kubernetes.io/name: sandbox-router
+    app.kubernetes.io/component: sandbox-router
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sandbox-router-wake
+subjects:
+- kind: ServiceAccount
+  name: sandbox-router
+  namespace: agent-sandbox-system
