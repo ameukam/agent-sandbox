@@ -52,7 +52,9 @@ type SandboxSpecApplyConfiguration struct {
 	// after an external fencing owner reports the ExecutionFenced condition for
 	// that execution, and it restores from status.committedCheckpoint.
 	// - Hibernated: the controller deletes the execution Pod after a checkpoint of
-	// that execution is committed to status.committedCheckpoint.
+	// that execution is committed to status.committedCheckpoint. Once that
+	// checkpoint is committed, the controller finishes the shutdown even if
+	// desiredLifecycle changes back to Active.
 	// When unset, the controller does not manage placement epochs or checkpoints.
 	// This field can only be set when the Sandbox is created. It requires
 	// operatingMode Running and failedPodPolicy Retain, because both alternatives

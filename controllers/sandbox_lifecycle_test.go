@@ -356,6 +356,39 @@ func TestLifecycleHibernateRecordsShutdownIntentBeforeDeletingPod(t *testing.T) 
 	require.Empty(t, got.Status.PodIPs)
 }
 
+func TestLifecycleWakeAfterCommitFinishesShutdown(t *testing.T) {
+	// The checkpoint of pod-1 is committed, then the Sandbox is woken before
+	// the controller deleted pod-1.
+	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-1", 1)
+	r, _ := newLifecycleReconciler(t, nil, sb, executionPod("pod-1", 1, false))
+
+	require.NoError(t, reconcileLifecycle(t, r))
+	pod := getLifecyclePod(t, r)
+	require.NotNil(t, pod)
+	require.Equal(t, sandboxv1beta1.SandboxShutdownIntentHibernate, pod.Annotations[sandboxv1beta1.SandboxShutdownIntentAnnotation])
+	got := getLifecycleSandbox(t, r)
+	requireCondition(t, got, sandboxv1beta1.SandboxConditionReady, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonExecutionShuttingDown)
+
+	require.NoError(t, reconcileLifecycle(t, r))
+	require.Nil(t, getLifecyclePod(t, r), "the committed execution is not resumed")
+
+	require.NoError(t, reconcileLifecycle(t, r))
+	got = getLifecycleSandbox(t, r)
+	require.Equal(t, "pod-1", got.Status.ExecutionPodUID)
+	requireCondition(t, got, sandboxv1beta1.SandboxConditionReady, metav1.ConditionFalse, sandboxv1beta1.SandboxReasonAwaitingExecutionFence)
+}
+
+func TestLifecycleCommittedGatedPodIsNotReleased(t *testing.T) {
+	sb := hibernatedSandbox(sandboxv1beta1.SandboxDesiredLifecycleActive, "pod-1", 1)
+	r, _ := newLifecycleReconciler(t, nil, sb, executionPod("pod-1", 1, true))
+
+	require.NoError(t, reconcileLifecycle(t, r))
+
+	pod := getLifecyclePod(t, r)
+	require.NotNil(t, pod)
+	require.True(t, hasPlacementSchedulingGate(pod))
+}
+
 func TestLifecycleWakeBlockedWithoutFence(t *testing.T) {
 	for name, fence := range map[string]func(*sandboxv1beta1.Sandbox){
 		"no fence condition": func(*sandboxv1beta1.Sandbox) {},
@@ -622,7 +655,7 @@ func TestCommitCheckpoint(t *testing.T) {
 		sb.Status.ExecutionPodUID = "pod-2"
 		return sb
 	}
-	validCommit := CheckpointCommit{SandboxUID: sandboxUID, Checkpoint: *lifecycleCheckpoint(2, "pod-2")}
+	validCommit := CheckpointCommit{SandboxUID: sandboxUID, SandboxGeneration: 1, Checkpoint: *lifecycleCheckpoint(2, "pod-2")}
 
 	tests := []struct {
 		name         string
@@ -663,15 +696,28 @@ func TestCommitCheckpoint(t *testing.T) {
 			wantRejected: true,
 		},
 		{
+			// Hibernated at generation 1, woken at 2, and hibernated again at
+			// 3. The same execution still holds the epoch, but the delayed
+			// checkpoint belongs to the first suspension attempt.
+			name: "delayed checkpoint from an earlier suspension attempt",
+			sandbox: func() *sandboxv1beta1.Sandbox {
+				sb := current()
+				sb.Generation = 3
+				return sb
+			}(),
+			commit:       validCommit,
+			wantRejected: true,
+		},
+		{
 			name:         "stale epoch",
 			sandbox:      current(),
-			commit:       CheckpointCommit{SandboxUID: sandboxUID, Checkpoint: *lifecycleCheckpoint(1, "pod-2")},
+			commit:       CheckpointCommit{SandboxUID: sandboxUID, SandboxGeneration: 1, Checkpoint: *lifecycleCheckpoint(1, "pod-2")},
 			wantRejected: true,
 		},
 		{
 			name:         "different source pod",
 			sandbox:      current(),
-			commit:       CheckpointCommit{SandboxUID: sandboxUID, Checkpoint: *lifecycleCheckpoint(2, "pod-1")},
+			commit:       CheckpointCommit{SandboxUID: sandboxUID, SandboxGeneration: 1, Checkpoint: *lifecycleCheckpoint(2, "pod-1")},
 			wantRejected: true,
 		},
 		{
@@ -749,7 +795,7 @@ func TestCommitCheckpointConflictIsRetryableAndRevalidated(t *testing.T) {
 			return nil
 		},
 	})
-	commit := CheckpointCommit{SandboxUID: sandboxUID, Checkpoint: *lifecycleCheckpoint(2, "pod-2")}
+	commit := CheckpointCommit{SandboxUID: sandboxUID, SandboxGeneration: 1, Checkpoint: *lifecycleCheckpoint(2, "pod-2")}
 
 	err := CommitCheckpoint(t.Context(), c, lifecycleKey, commit)
 	require.Error(t, err)

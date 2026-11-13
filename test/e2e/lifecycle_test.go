@@ -98,6 +98,8 @@ func TestSandboxHibernateAndFencedWake(t *testing.T) {
 	tc.MustWaitForObject(sandbox, predicates.ConditionReasonEquals(
 		string(sandboxv1beta1.SandboxConditionHibernated), sandboxv1beta1.SandboxReasonAwaitingCheckpoint))
 	tc.MustExist(firstPod)
+	// The runtime accepts the suspension request at this Sandbox generation.
+	require.NoError(t, tc.Get(ctx, key, sandbox))
 
 	checkpoint := sandboxv1beta1.SandboxCheckpointReference{
 		ManifestURI:        "gs://e2e-unused/" + string(firstPod.UID) + "/manifest.json",
@@ -108,10 +110,10 @@ func TestSandboxHibernateAndFencedWake(t *testing.T) {
 	}
 	stale := checkpoint
 	stale.PlacementEpoch = 7
-	require.ErrorIs(t, controllers.CommitCheckpoint(ctx, c, key, controllers.CheckpointCommit{SandboxUID: sandbox.UID, Checkpoint: stale}),
+	require.ErrorIs(t, controllers.CommitCheckpoint(ctx, c, key, controllers.CheckpointCommit{SandboxUID: sandbox.UID, SandboxGeneration: sandbox.Generation, Checkpoint: stale}),
 		controllers.ErrCheckpointRejected)
 	require.NoError(t, retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		return controllers.CommitCheckpoint(ctx, c, key, controllers.CheckpointCommit{SandboxUID: sandbox.UID, Checkpoint: checkpoint})
+		return controllers.CommitCheckpoint(ctx, c, key, controllers.CheckpointCommit{SandboxUID: sandbox.UID, SandboxGeneration: sandbox.Generation, Checkpoint: checkpoint})
 	}))
 
 	require.NoError(t, tc.WaitForObjectNotFound(ctx, firstPod))

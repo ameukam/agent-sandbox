@@ -189,6 +189,10 @@ const (
 	// SandboxReasonAwaitingExecutionFence is a Ready=False reason: the controller
 	// needs a replacement execution Pod but the previous execution is not fenced.
 	SandboxReasonAwaitingExecutionFence = "AwaitingExecutionFence"
+	// SandboxReasonExecutionShuttingDown is a Ready=False reason: a checkpoint of
+	// the current execution is committed, so the controller shuts that
+	// execution down, even if desiredLifecycle changed back to Active.
+	SandboxReasonExecutionShuttingDown = "ExecutionShuttingDown"
 	// SandboxReasonHibernated is a Ready=False reason: the Sandbox is hibernated.
 	SandboxReasonHibernated = "SandboxHibernated"
 	// SandboxReasonRecoveryRequired is a Ready=False reason: see the
@@ -346,7 +350,9 @@ const (
 	SandboxDesiredLifecycleActive SandboxDesiredLifecycle = "Active"
 	// SandboxDesiredLifecycleHibernated requests deep hibernation. The controller
 	// deletes the execution Pod only after a checkpoint of that execution is
-	// committed and the shutdown intent is recorded on the Pod.
+	// committed and the shutdown intent is recorded on the Pod. Once that
+	// checkpoint is committed, the controller finishes the shutdown even if
+	// desiredLifecycle changes back to Active.
 	SandboxDesiredLifecycleHibernated SandboxDesiredLifecycle = "Hibernated"
 )
 
@@ -470,7 +476,9 @@ type SandboxSpec struct {
 	//     after an external fencing owner reports the ExecutionFenced condition for
 	//     that execution, and it restores from status.committedCheckpoint.
 	//   - Hibernated: the controller deletes the execution Pod after a checkpoint of
-	//     that execution is committed to status.committedCheckpoint.
+	//     that execution is committed to status.committedCheckpoint. Once that
+	//     checkpoint is committed, the controller finishes the shutdown even if
+	//     desiredLifecycle changes back to Active.
 	// When unset, the controller does not manage placement epochs or checkpoints.
 	// This field can only be set when the Sandbox is created. It requires
 	// operatingMode Running and failedPodPolicy Retain, because both alternatives

@@ -334,7 +334,13 @@ func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, san
 		return true, 0, nil
 	}
 
-	if hasPlacementSchedulingGate(pod) {
+	// A committed checkpoint of the current execution ends that execution,
+	// whatever desiredLifecycle says now. Resuming it would let it change
+	// state that the checkpoint does not capture, and the committed
+	// checkpoint would still authorize deleting it later (DESIGN 5.2).
+	shutdownCommitted := checkpointOfCurrentExecution(sandbox)
+
+	if hasPlacementSchedulingGate(pod) && !shutdownCommitted {
 		if sandbox.Spec.DesiredLifecycle != sandboxv1beta1.SandboxDesiredLifecycleActive {
 			logger.V(4).Info("Keeping the execution Pod gated because the Sandbox is not desired Active", "Pod.Name", pod.Name)
 			return true, 0, nil
@@ -361,13 +367,12 @@ func (r *SandboxReconciler) reconcileManagedExistingPod(ctx context.Context, san
 		logger.Info("Released execution Pod for scheduling", "Pod.Name", pod.Name, "placementEpoch", sandbox.Status.PlacementEpoch)
 	}
 
-	if sandbox.Spec.DesiredLifecycle != sandboxv1beta1.SandboxDesiredLifecycleHibernated {
-		return false, 0, nil
-	}
-
 	// Hibernation deletes the execution only after its checkpoint is committed
 	// and the shutdown intent is persisted on the Pod (DESIGN 4.1, 5.2 step 6).
-	if !checkpointOfCurrentExecution(sandbox) {
+	if !shutdownCommitted {
+		if sandbox.Spec.DesiredLifecycle != sandboxv1beta1.SandboxDesiredLifecycleHibernated {
+			return false, 0, nil
+		}
 		logger.V(4).Info("Keeping execution Pod until its checkpoint is committed", "Pod.Name", pod.Name)
 		return true, 0, nil
 	}
@@ -462,6 +467,10 @@ func lifecycleConditions(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (hibe
 		ready = readyOverride(sandboxv1beta1.SandboxReasonRecoveryRequired, recovery.Message)
 	case hibernated.Status == metav1.ConditionTrue:
 		ready = readyOverride(sandboxv1beta1.SandboxReasonHibernated, "")
+	case ownedPod && isCurrentExecutionPod(sandbox, pod) && checkpointOfCurrentExecution(sandbox):
+		ready = readyOverride(sandboxv1beta1.SandboxReasonExecutionShuttingDown,
+			fmt.Sprintf("checkpoint operation %q of execution Pod %q is committed, so that execution is shutting down",
+				status.CommittedCheckpoint.OperationID, status.ExecutionPodUID))
 	case pod == nil && desired == sandboxv1beta1.SandboxDesiredLifecycleActive &&
 		status.ExecutionPodUID != "" && !previousExecutionFenced(sandbox):
 		ready = readyOverride(sandboxv1beta1.SandboxReasonAwaitingExecutionFence,
@@ -476,6 +485,11 @@ func lifecycleConditions(sandbox *sandboxv1beta1.Sandbox, pod *corev1.Pod) (hibe
 type CheckpointCommit struct {
 	// SandboxUID is the UID of the Sandbox the checkpoint operation started for.
 	SandboxUID types.UID
+	// SandboxGeneration is the Sandbox metadata.generation at which the
+	// runtime accepted the suspension request, with desiredLifecycle
+	// Hibernated. Any later spec change, such as a wake followed by another
+	// hibernation, starts a new suspension attempt and rejects this commit.
+	SandboxGeneration int64
 	// Checkpoint is the reference to adopt. Its PlacementEpoch and SourcePodUID
 	// must still name the Sandbox's current execution.
 	Checkpoint sandboxv1beta1.SandboxCheckpointReference
@@ -487,9 +501,10 @@ type CheckpointCommit struct {
 var ErrCheckpointRejected = errors.New("checkpoint rejected")
 
 // CommitCheckpoint adopts a committed checkpoint reference into the Sandbox
-// status (DESIGN 5.2 step 5). It succeeds only while the Sandbox UID, placement
-// epoch, execution Pod UID, and desired lifecycle Hibernated still match the
-// operation, so a late upload for a changed or deleted Sandbox is rejected.
+// status (DESIGN 5.2 step 5). It succeeds only while the Sandbox UID,
+// generation, placement epoch, execution Pod UID, and desired lifecycle
+// Hibernated still match the operation, so a late upload for a changed or
+// deleted Sandbox, or for an earlier suspension attempt, is rejected.
 // The status patch carries the resourceVersion that the checks read. A
 // conflict returns an error that is not ErrCheckpointRejected; the caller
 // retries, and the retry repeats every check against the newer Sandbox.
@@ -509,6 +524,8 @@ func CommitCheckpoint(ctx context.Context, c client.Client, key types.Namespaced
 		return fmt.Errorf("%w: sandbox %s is being deleted", ErrCheckpointRejected, key)
 	case sandbox.Spec.DesiredLifecycle != sandboxv1beta1.SandboxDesiredLifecycleHibernated:
 		return fmt.Errorf("%w: sandbox %s desired lifecycle is %q, not Hibernated", ErrCheckpointRejected, key, sandbox.Spec.DesiredLifecycle)
+	case commit.SandboxGeneration != sandbox.Generation:
+		return fmt.Errorf("%w: checkpoint was requested at sandbox generation %d, not the current generation %d", ErrCheckpointRejected, commit.SandboxGeneration, sandbox.Generation)
 	case cp.PlacementEpoch != sandbox.Status.PlacementEpoch:
 		return fmt.Errorf("%w: checkpoint placement epoch %d is not the current epoch %d", ErrCheckpointRejected, cp.PlacementEpoch, sandbox.Status.PlacementEpoch)
 	case cp.SourcePodUID == "" || cp.SourcePodUID != sandbox.Status.ExecutionPodUID:
