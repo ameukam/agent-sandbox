@@ -427,6 +427,63 @@ func TestValidate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name:    "wake requires an authorizing authz mode",
+			mut:     func(c *Config) { c.WakeEnabled = true },
+			wantErr: "--wake-enabled requires --authz-mode",
+		},
+		{
+			name: "wake settings are ignored while wake is disabled",
+			mut: func(c *Config) {
+				c.WakeMaxWaiting = 0
+				c.WakeDeadline = 0
+			},
+			wantErr: "",
+		},
+		{
+			name: "valid wake configuration",
+			mut: func(c *Config) {
+				c.WakeEnabled = true
+				c.AuthzMode = AuthzTokenReview
+			},
+			wantErr: "",
+		},
+		{
+			name: "wake per-sandbox bound must be positive",
+			mut: func(c *Config) {
+				c.WakeEnabled = true
+				c.AuthzMode = AuthzTokenReview
+				c.WakeMaxWaitingPerSandbox = 0
+			},
+			wantErr: "--wake-max-waiting-per-sandbox must be positive",
+		},
+		{
+			name: "wake global bound must cover the per-sandbox bound",
+			mut: func(c *Config) {
+				c.WakeEnabled = true
+				c.AuthzMode = AuthzTokenReview
+				c.WakeMaxWaiting = c.WakeMaxWaitingPerSandbox - 1
+			},
+			wantErr: "--wake-max-waiting (7) must be at least",
+		},
+		{
+			name: "wake deadline must be positive",
+			mut: func(c *Config) {
+				c.WakeEnabled = true
+				c.AuthzMode = AuthzTokenReview
+				c.WakeDeadline = 0
+			},
+			wantErr: "--wake-deadline must be positive",
+		},
+		{
+			name: "wake retry-after must be positive",
+			mut: func(c *Config) {
+				c.WakeEnabled = true
+				c.AuthzMode = AuthzTokenReview
+				c.WakeRetryAfter = 0
+			},
+			wantErr: "--wake-retry-after must be positive",
+		},
+		{
 			name: "scoped-token v2 requires cache",
 			mut: func(c *Config) {
 				c.AuthzMode = AuthzScopedToken

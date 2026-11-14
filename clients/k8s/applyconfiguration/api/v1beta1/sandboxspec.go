@@ -45,6 +45,25 @@ type SandboxSpecApplyConfiguration struct {
 	// actually up (see SandboxConditionReady).
 	// Defaults to Running if not specified.
 	OperatingMode *apiv1beta1.SandboxOperatingMode `json:"operatingMode,omitempty"`
+	// desiredLifecycle is an alpha, experimental field that opts the Sandbox into
+	// checkpoint-based deep hibernation:
+	// - Active: the controller creates the first execution Pod, which holds
+	// placement epoch 1. The controller does not yet create a replacement for a
+	// previous execution, because no runtime restore contract is implemented.
+	// It reports Ready=False with reason AwaitingExecutionFence until an
+	// external fencing owner reports the ExecutionFenced condition for that
+	// execution, and with reason CheckpointRestoreUnsupported afterwards.
+	// - Hibernated: the controller deletes the execution Pod after a checkpoint of
+	// that execution is committed to status.committedCheckpoint. Once that
+	// checkpoint is committed, the controller finishes the shutdown even if
+	// desiredLifecycle changes back to Active.
+	// When unset, the controller does not manage placement epochs or checkpoints.
+	// This field can only be set when the Sandbox is created. It requires
+	// operatingMode Running and failedPodPolicy Retain, because both alternatives
+	// would end or replace an execution without a committed checkpoint or fence.
+	// It also requires an empty podTemplate.spec.nodeName, because a Pod bound
+	// to a node at creation would bypass the placement scheduling gate.
+	DesiredLifecycle *apiv1beta1.SandboxDesiredLifecycle `json:"desiredLifecycle,omitempty"`
 }
 
 // SandboxSpecApplyConfiguration constructs a declarative configuration of the SandboxSpec type for use with
@@ -111,5 +130,13 @@ func (b *SandboxSpecApplyConfiguration) WithShutdownPolicy(value apiv1beta1.Shut
 // If called multiple times, the OperatingMode field is set to the value of the last call.
 func (b *SandboxSpecApplyConfiguration) WithOperatingMode(value apiv1beta1.SandboxOperatingMode) *SandboxSpecApplyConfiguration {
 	b.OperatingMode = &value
+	return b
+}
+
+// WithDesiredLifecycle sets the DesiredLifecycle field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the DesiredLifecycle field is set to the value of the last call.
+func (b *SandboxSpecApplyConfiguration) WithDesiredLifecycle(value apiv1beta1.SandboxDesiredLifecycle) *SandboxSpecApplyConfiguration {
+	b.DesiredLifecycle = &value
 	return b
 }

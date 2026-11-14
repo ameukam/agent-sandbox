@@ -207,6 +207,9 @@ func TestCoreDeploymentArgsAreAValidRouterConfiguration(t *testing.T) {
 	if cfg.AuthzMode != config.AuthzAllowAll || !cfg.CacheEnabled {
 		t.Fatalf("core install must keep allow-all with the Pod cache: mode=%q cache=%v", cfg.AuthzMode, cfg.CacheEnabled)
 	}
+	if cfg.WakeEnabled {
+		t.Fatal("core install must keep the experimental wake path disabled")
+	}
 }
 
 func TestInformerRBACRemainsPodReadOnly(t *testing.T) {
@@ -243,6 +246,44 @@ func TestInformerRBACRemainsPodReadOnly(t *testing.T) {
 	}
 }
 
+func TestWakeRBACGrantsOnlyWhatTheWakePathUses(t *testing.T) {
+	documents := yamlDocuments(t, "rbac-wake.yaml")
+	if len(documents) != 2 {
+		t.Fatalf("rbac-wake.yaml: got %d documents want 2", len(documents))
+	}
+
+	var role rbacv1.ClusterRole
+	if err := yaml.UnmarshalStrict(documents[0], &role); err != nil {
+		t.Fatalf("parse ClusterRole: %v", err)
+	}
+	wantRules := []rbacv1.PolicyRule{
+		{APIGroups: []string{"agents.x-k8s.io"}, Resources: []string{"sandboxes"}, Verbs: []string{"get", "patch"}},
+		{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get"}},
+	}
+	if len(role.Rules) != len(wantRules) {
+		t.Fatalf("ClusterRole rules: got %+v want %+v", role.Rules, wantRules)
+	}
+	for i, want := range wantRules {
+		got := role.Rules[i]
+		if !slices.Equal(got.APIGroups, want.APIGroups) || !slices.Equal(got.Resources, want.Resources) ||
+			!slices.Equal(got.Verbs, want.Verbs) || len(got.ResourceNames) != 0 || len(got.NonResourceURLs) != 0 {
+			t.Fatalf("rule %d: got %+v want %+v", i, got, want)
+		}
+	}
+
+	var binding rbacv1.ClusterRoleBinding
+	if err := yaml.UnmarshalStrict(documents[1], &binding); err != nil {
+		t.Fatalf("parse ClusterRoleBinding: %v", err)
+	}
+	if binding.RoleRef.APIGroup != rbacv1.GroupName || binding.RoleRef.Kind != "ClusterRole" || binding.RoleRef.Name != role.Name {
+		t.Fatalf("unexpected roleRef: %+v", binding.RoleRef)
+	}
+	wantSubject := rbacv1.Subject{Kind: "ServiceAccount", Name: "sandbox-router", Namespace: "agent-sandbox-system"}
+	if len(binding.Subjects) != 1 || binding.Subjects[0] != wantSubject {
+		t.Fatalf("unexpected subjects: %+v", binding.Subjects)
+	}
+}
+
 func TestCoreKustomizationExcludesTokenReviewRBAC(t *testing.T) {
 	kustomization := readManifest[coreKustomization](t, "kustomization.yaml")
 	wantResources := []string{
@@ -258,6 +299,9 @@ func TestCoreKustomizationExcludesTokenReviewRBAC(t *testing.T) {
 	}
 	if slices.Contains(kustomization.Resources, "rbac-tokenreview.yaml") {
 		t.Fatal("core deployment must not grant TokenReview RBAC")
+	}
+	if slices.Contains(kustomization.Resources, "rbac-wake.yaml") {
+		t.Fatal("core deployment must not grant Sandbox write RBAC for the experimental wake path")
 	}
 }
 

@@ -39,7 +39,8 @@ func fullPodFixture() *corev1.Pod {
 			Finalizers: []string{"test-finalizer"},
 		},
 		Spec: corev1.PodSpec{
-			NodeName: "node-7",
+			NodeName:        "node-7",
+			SchedulingGates: []corev1.PodSchedulingGate{{Name: sandboxv1beta1.SandboxPlacementSchedulingGate}},
 			Containers: []corev1.Container{{
 				Name: "c", Image: "debian:latest",
 				Env: []corev1.EnvVar{{Name: "A", Value: "B"}},
@@ -61,7 +62,7 @@ func fullPodFixture() *corev1.Pod {
 
 // TestPodCacheTransform verifies exactly what the informer transform keeps
 // and drops: everything the controllers read survives (metadata, status,
-// spec.nodeName); managedFields and the bulky spec payload do not.
+// spec.nodeName, spec.schedulingGates); managedFields and the bulky spec payload do not.
 func TestPodCacheTransform(t *testing.T) {
 	out, err := PodCacheTransform(fullPodFixture())
 	if err != nil {
@@ -87,6 +88,9 @@ func TestPodCacheTransform(t *testing.T) {
 	// Kept: the fields the controllers actually read.
 	if pod.Spec.NodeName != "node-7" {
 		t.Errorf("spec.nodeName lost: %q", pod.Spec.NodeName)
+	}
+	if !hasPlacementSchedulingGate(pod) {
+		t.Errorf("spec.schedulingGates lost: %+v", pod.Spec.SchedulingGates)
 	}
 	if pod.Labels[sandboxv1beta1.SandboxNameHashLabel] != "hash-1" {
 		t.Error("labels lost")

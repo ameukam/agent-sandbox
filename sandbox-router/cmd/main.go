@@ -41,6 +41,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	sandboxclientset "sigs.k8s.io/agent-sandbox/clients/k8s/clientset/versioned"
 	asmetrics "sigs.k8s.io/agent-sandbox/internal/metrics"
 	"sigs.k8s.io/agent-sandbox/internal/version"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/authz"
@@ -50,6 +51,7 @@ import (
 	"sigs.k8s.io/agent-sandbox/sandbox-router/proxy"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/server"
 	"sigs.k8s.io/agent-sandbox/sandbox-router/tlsutil"
+	"sigs.k8s.io/agent-sandbox/sandbox-router/wake"
 )
 
 func main() {
@@ -202,16 +204,21 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 		}
 	}
 
-	// --- Kubernetes client (shared by cache + tokenreview) ----------------
-	// Build once if either feature needs it so we don't load kubeconfig
-	// twice. Nil when neither feature is on; helpers below handle that.
+	// --- Kubernetes client (shared by cache, tokenreview, and wake) -------
+	// Build once if any feature needs it so we don't load kubeconfig
+	// twice. Nil when no such feature is on; helpers below handle that.
 	var k8sClient kubernetes.Interface
-	if cfg.CacheEnabled || cfg.AuthzMode == config.AuthzTokenReview {
-		c, err := buildKubernetesClient(cfg.Kubeconfig)
+	var restConfig *rest.Config
+	if cfg.CacheEnabled || cfg.AuthzMode == config.AuthzTokenReview || cfg.WakeEnabled {
+		var err error
+		restConfig, err = loadRESTConfig(cfg.Kubeconfig)
+		if err != nil {
+			return fmt.Errorf("kubernetes client: build rest config: %w", err)
+		}
+		k8sClient, err = kubernetes.NewForConfig(restConfig)
 		if err != nil {
 			return fmt.Errorf("kubernetes client: %w", err)
 		}
-		k8sClient = c
 	}
 
 	// --- Pod-IP cache (optional, KEP-NNNN fast path) ----------------------
@@ -330,7 +337,21 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 	// All other paths fall through to the proxy.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", probes.Healthz)
-	mux.Handle("/", handler)
+	var routeHandler http.Handler = handler
+	if cfg.WakeEnabled {
+		sandboxClient, err := sandboxclientset.NewForConfig(restConfig)
+		if err != nil {
+			return fmt.Errorf("sandbox client: %w", err)
+		}
+		routeHandler = newWakeHandler(cfg, authorizer,
+			&wake.KubernetesLifecycle{Sandboxes: sandboxClient, Pods: k8sClient}, handler)
+		log.Info("experimental wake path enabled (--wake-enabled)",
+			"maxWaitingPerSandbox", cfg.WakeMaxWaitingPerSandbox,
+			"maxWaiting", cfg.WakeMaxWaiting,
+			"deadline", cfg.WakeDeadline,
+			"retryAfter", cfg.WakeRetryAfter)
+	}
+	mux.Handle("/", routeHandler)
 
 	// Wrap with observability middleware. Layering (outer → inner):
 	//   tracing  — opens span, attaches per-request logger w/ trace_id
@@ -385,6 +406,7 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 		"otelMetrics", cfg.EnableOTelMetrics,
 		"cache", cfg.CacheEnabled,
 		"authz", cfg.AuthzMode,
+		"wake", cfg.WakeEnabled,
 		"pathRoutingPrefix", cfg.PathRoutingPrefix,
 		"pathRoutingPreservePrefix", cfg.PathRoutingPreservePrefix,
 		"pathRoutingRewriteResponses", cfg.PathRoutingRewriteResponses,
@@ -392,8 +414,8 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 	return srv.Run(ctx)
 }
 
-// buildKubernetesClient returns a typed client built from kubeconfigPath
-// when non-empty, or the in-cluster config (ServiceAccount token + the
+// loadRESTConfig returns a REST config built from kubeconfigPath when
+// non-empty, or the in-cluster config (ServiceAccount token + the
 // kubernetes.default API server) when empty. Mirrors clientcmd's
 // standard precedence so operators can run the router locally with
 // KUBECONFIG and in-cluster without any flag.
@@ -406,16 +428,6 @@ func run(ctx context.Context, cfg *config.Config, log logr.Logger) (err error) {
 // in-cluster mode despite the documented behavior. Only when
 // InClusterConfig fails (we're not running in a Pod) do we fall back
 // to clientcmd so the local-dev path keeps working.
-func buildKubernetesClient(kubeconfigPath string) (kubernetes.Interface, error) {
-	restConfig, err := loadRESTConfig(kubeconfigPath)
-	if err != nil {
-		return nil, fmt.Errorf("build rest config: %w", err)
-	}
-	return kubernetes.NewForConfig(restConfig)
-}
-
-// loadRESTConfig is split out so the precedence logic is testable
-// without spinning up a real client.
 func loadRESTConfig(kubeconfigPath string) (*rest.Config, error) {
 	if kubeconfigPath != "" {
 		// Explicit path overrides everything: respect what the

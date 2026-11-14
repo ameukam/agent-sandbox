@@ -251,6 +251,20 @@ func RegisterFlags(fs *flag.FlagSet, c *Config, lookup LookupEnvFunc) {
 			"the router watches sandbox-owned Pods and dials cached IPs for "+
 			"requests carrying X-Sandbox-UID, bypassing DNS. Requires Pod "+
 			"get/list/watch RBAC and either in-cluster config or --kubeconfig.")
+	fs.BoolVar(&c.WakeEnabled, "wake-enabled", c.WakeEnabled,
+		"Alpha, experimental. Serve X-Sandbox-Wake: true requests for Sandboxes "+
+			"that use spec.desiredLifecycle: authorize the request, set "+
+			"desiredLifecycle to Active, and wait in a bounded queue for the "+
+			"current ready execution Pod. Requires a non-allow-all "+
+			"--authz-mode and the RBAC in deploy/rbac-wake.yaml.")
+	fs.IntVar(&c.WakeMaxWaitingPerSandbox, "wake-max-waiting-per-sandbox", c.WakeMaxWaitingPerSandbox,
+		"Maximum wake requests waiting for one Sandbox. Further requests get 503 with Retry-After.")
+	fs.IntVar(&c.WakeMaxWaiting, "wake-max-waiting", c.WakeMaxWaiting,
+		"Maximum wake requests waiting across all Sandboxes. Further requests get 503 with Retry-After.")
+	fs.DurationVar(&c.WakeDeadline, "wake-deadline", c.WakeDeadline,
+		"How long one wake request waits for the current execution Pod before it gets 503 with Retry-After.")
+	fs.DurationVar(&c.WakeRetryAfter, "wake-retry-after", c.WakeRetryAfter,
+		"Delay advertised in the Retry-After header of a 503 wake response. Rounded up to whole seconds.")
 	fs.StringVar(&c.CacheNamespace, "cache-namespace", c.CacheNamespace,
 		"Optional namespace filter for the Pod informer. Empty means "+
 			"cluster-wide. Ignored when --cache-enabled=false.")

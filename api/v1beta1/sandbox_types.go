@@ -142,6 +142,90 @@ const (
 	// Teardown of its underlying resources may still be pending (see Lifecycle).
 	SandboxReasonExpired = "SandboxExpired"
 
+	// SandboxConditionHibernated is an alpha, experimental condition that the
+	// controller sets only when spec.desiredLifecycle is set. Status is True when
+	// desiredLifecycle is Hibernated, no execution Pod exists,
+	// status.committedCheckpoint belongs to the most recent execution, and the
+	// ExecutionFenced condition confirms that execution stopped (reason
+	// CheckpointCommitted). Otherwise Status is False with reason NotHibernated,
+	// AwaitingCheckpoint, AwaitingExecutionTermination, or PodTerminating.
+	SandboxConditionHibernated ConditionType = "Hibernated"
+	// SandboxReasonCheckpointCommitted is the Hibernated=True reason.
+	SandboxReasonCheckpointCommitted = "CheckpointCommitted"
+	// SandboxReasonNotHibernated is a Hibernated=False reason: desiredLifecycle is Active.
+	SandboxReasonNotHibernated = "NotHibernated"
+	// SandboxReasonAwaitingCheckpoint is a Hibernated=False reason: no committed
+	// checkpoint for the most recent execution exists yet, so the controller keeps
+	// the execution Pod.
+	SandboxReasonAwaitingCheckpoint = "AwaitingCheckpoint"
+	// SandboxReasonAwaitingExecutionTermination is a Hibernated=False reason: the
+	// checkpoint is committed and the execution Pod is gone, but the
+	// ExecutionFenced condition does not yet confirm that the execution stopped.
+	SandboxReasonAwaitingExecutionTermination = "AwaitingExecutionTermination"
+
+	// SandboxConditionRecoveryRequired is an alpha, experimental condition that the
+	// controller sets only when spec.desiredLifecycle is set. Status is True when
+	// the controller cannot establish execution ownership or a recoverable
+	// checkpoint, so it publishes no execution. The reason names the cause.
+	// The controller keeps the evidence (Pods and status) in place.
+	SandboxConditionRecoveryRequired ConditionType = "RecoveryRequired"
+	// SandboxReasonNoRecoveryRequired is the RecoveryRequired=False reason.
+	SandboxReasonNoRecoveryRequired = "NoRecoveryRequired"
+	// SandboxReasonNoCommittedCheckpoint is a RecoveryRequired=True reason: a
+	// previous execution existed, it is gone, and no committed checkpoint exists
+	// to restore from.
+	SandboxReasonNoCommittedCheckpoint = "NoCommittedCheckpoint"
+	// SandboxReasonUnexpectedExecutionPod is a RecoveryRequired=True reason: an
+	// owned Pod has started but its UID or placement epoch does not match
+	// status.executionPodUID and status.placementEpoch.
+	SandboxReasonUnexpectedExecutionPod = "UnexpectedExecutionPod"
+	// SandboxReasonExecutionIdentityUnknown is a RecoveryRequired=True reason:
+	// status.placementEpoch is set but status.executionPodUID is empty, so the
+	// controller cannot tell which execution must be fenced.
+	SandboxReasonExecutionIdentityUnknown = "ExecutionIdentityUnknown"
+
+	// SandboxConditionExecutionFenced is an alpha, experimental condition that an
+	// external fencing owner sets, not the controller. Status True means the
+	// fencing owner verified that the execution named by status.fencedExecution
+	// can no longer run or write. The controller reports Hibernated=True, and
+	// treats the previous execution as stopped, only when this condition is True
+	// and status.fencedExecution matches status.executionPodUID and
+	// status.placementEpoch.
+	SandboxConditionExecutionFenced ConditionType = "ExecutionFenced"
+	// SandboxReasonAwaitingExecutionFence is a Ready=False reason: the controller
+	// needs a replacement execution Pod but the previous execution is not fenced.
+	SandboxReasonAwaitingExecutionFence = "AwaitingExecutionFence"
+	// SandboxReasonCheckpointRestoreUnsupported is a Ready=False reason: the
+	// previous execution is fenced and its checkpoint is committed, but the
+	// controller does not create a replacement execution Pod. No runtime restore
+	// contract is implemented or qualified, so nothing could verify that a
+	// replacement restored the checkpoint before it served traffic.
+	SandboxReasonCheckpointRestoreUnsupported = "CheckpointRestoreUnsupported"
+	// SandboxReasonExecutionShuttingDown is a Ready=False reason: a checkpoint of
+	// the current execution is committed, so the controller shuts that
+	// execution down, even if desiredLifecycle changed back to Active.
+	SandboxReasonExecutionShuttingDown = "ExecutionShuttingDown"
+	// SandboxReasonHibernated is a Ready=False reason: the Sandbox is hibernated.
+	SandboxReasonHibernated = "SandboxHibernated"
+	// SandboxReasonRecoveryRequired is a Ready=False reason: see the
+	// RecoveryRequired condition for the cause.
+	SandboxReasonRecoveryRequired = "RecoveryRequired"
+
+	// SandboxPlacementEpochAnnotation is an alpha, experimental annotation the
+	// controller sets on an execution Pod. Its value is the decimal placement
+	// epoch that the Pod holds.
+	SandboxPlacementEpochAnnotation = "agents.x-k8s.io/placement-epoch"
+	// SandboxShutdownIntentAnnotation is an alpha, experimental annotation the
+	// controller sets on the execution Pod before it deletes that Pod for
+	// hibernation. Its value is SandboxShutdownIntentHibernate.
+	SandboxShutdownIntentAnnotation = "agents.x-k8s.io/shutdown-intent"
+	// SandboxShutdownIntentHibernate is the value of SandboxShutdownIntentAnnotation.
+	SandboxShutdownIntentHibernate = "Hibernate"
+	// SandboxPlacementSchedulingGate is the Pod scheduling gate that keeps a new
+	// execution Pod from being scheduled until the controller has recorded its
+	// placement epoch and UID in the Sandbox status.
+	SandboxPlacementSchedulingGate = "agents.x-k8s.io/placement-pending"
+
 	// SandboxPodNameAnnotation is the annotation used to track the pod name adopted from a warm pool.
 	// Deprecated: New Sandboxes use their own name for the backing pod while non-empty legacy annotations may still be honored.
 	SandboxPodNameAnnotation = "agents.x-k8s.io/pod-name"
@@ -257,6 +341,25 @@ const (
 	SandboxOperatingModeSuspended SandboxOperatingMode = "Suspended"
 )
 
+// SandboxDesiredLifecycle is the alpha, experimental desired hibernation state
+// of a Sandbox.
+// +kubebuilder:validation:Enum=Active;Hibernated
+type SandboxDesiredLifecycle string
+
+const (
+	// SandboxDesiredLifecycleActive requests an executing Sandbox. The controller
+	// creates the first execution Pod. It does not yet create a replacement for a
+	// previous execution: after that execution is fenced, the Sandbox reports
+	// Ready=False with reason CheckpointRestoreUnsupported.
+	SandboxDesiredLifecycleActive SandboxDesiredLifecycle = "Active"
+	// SandboxDesiredLifecycleHibernated requests deep hibernation. The controller
+	// deletes the execution Pod only after a checkpoint of that execution is
+	// committed and the shutdown intent is recorded on the Pod. Once that
+	// checkpoint is committed, the controller finishes the shutdown even if
+	// desiredLifecycle changes back to Active.
+	SandboxDesiredLifecycleHibernated SandboxDesiredLifecycle = "Hibernated"
+)
+
 // FailedPodPolicy controls behavior when the backing Pod reaches phase Failed.
 // +kubebuilder:validation:Enum=Retain;Recreate
 type FailedPodPolicy string
@@ -338,6 +441,10 @@ type SandboxBlueprint struct {
 // SandboxSpec defines the desired state of Sandbox.
 // volumeClaimTemplates is immutable after creation.
 // +kubebuilder:validation:XValidation:rule="has(self.volumeClaimTemplates) == has(oldSelf.volumeClaimTemplates) && (!has(self.volumeClaimTemplates) || self.volumeClaimTemplates == oldSelf.volumeClaimTemplates)",message="volumeClaimTemplates is immutable"
+// +kubebuilder:validation:XValidation:rule="has(self.desiredLifecycle) == has(oldSelf.desiredLifecycle)",message="desiredLifecycle can only be set when the Sandbox is created and cannot be removed"
+// +kubebuilder:validation:XValidation:rule="!has(self.desiredLifecycle) || !has(self.operatingMode) || self.operatingMode == 'Running'",message="desiredLifecycle requires operatingMode Running"
+// +kubebuilder:validation:XValidation:rule="!has(self.desiredLifecycle) || !has(self.failedPodPolicy) || self.failedPodPolicy == 'Retain'",message="desiredLifecycle requires failedPodPolicy Retain"
+// +kubebuilder:validation:XValidation:rule="!has(self.desiredLifecycle) || !has(self.podTemplate.spec.nodeName) || size(self.podTemplate.spec.nodeName) == 0",message="desiredLifecycle requires podTemplate.spec.nodeName to be empty"
 type SandboxSpec struct {
 	// The following markers will use OpenAPI v3 schema to validate the value
 	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
@@ -365,6 +472,75 @@ type SandboxSpec struct {
 	// +kubebuilder:default=Running
 	// +optional
 	OperatingMode SandboxOperatingMode `json:"operatingMode,omitempty"`
+
+	// desiredLifecycle is an alpha, experimental field that opts the Sandbox into
+	// checkpoint-based deep hibernation:
+	//   - Active: the controller creates the first execution Pod, which holds
+	//     placement epoch 1. The controller does not yet create a replacement for a
+	//     previous execution, because no runtime restore contract is implemented.
+	//     It reports Ready=False with reason AwaitingExecutionFence until an
+	//     external fencing owner reports the ExecutionFenced condition for that
+	//     execution, and with reason CheckpointRestoreUnsupported afterwards.
+	//   - Hibernated: the controller deletes the execution Pod after a checkpoint of
+	//     that execution is committed to status.committedCheckpoint. Once that
+	//     checkpoint is committed, the controller finishes the shutdown even if
+	//     desiredLifecycle changes back to Active.
+	// When unset, the controller does not manage placement epochs or checkpoints.
+	// This field can only be set when the Sandbox is created. It requires
+	// operatingMode Running and failedPodPolicy Retain, because both alternatives
+	// would end or replace an execution without a committed checkpoint or fence.
+	// It also requires an empty podTemplate.spec.nodeName, because a Pod bound
+	// to a node at creation would bypass the placement scheduling gate.
+	// +optional
+	DesiredLifecycle SandboxDesiredLifecycle `json:"desiredLifecycle,omitempty"`
+}
+
+// SandboxCheckpointReference is an alpha, experimental reference to a committed
+// checkpoint manifest. It records ownership and discovery, not proof that the
+// checkpoint bytes are durable.
+type SandboxCheckpointReference struct {
+	// manifestURI is the URI of the immutable checkpoint manifest object.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=2048
+	ManifestURI string `json:"manifestURI"`
+
+	// manifestGeneration is the object generation of the manifest at manifestURI.
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	ManifestGeneration int64 `json:"manifestGeneration"`
+
+	// operationID identifies the runtime checkpoint operation that produced the manifest.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	OperationID string `json:"operationID"`
+
+	// placementEpoch is the placement epoch of the execution that produced the checkpoint.
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	PlacementEpoch int64 `json:"placementEpoch"`
+
+	// sourcePodUID is the UID of the execution Pod that produced the checkpoint.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	SourcePodUID string `json:"sourcePodUID"`
+}
+
+// SandboxExecutionIdentity is an alpha, experimental identifier of one execution
+// of a Sandbox.
+type SandboxExecutionIdentity struct {
+	// podUID is the UID of the execution Pod.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=128
+	PodUID string `json:"podUID"`
+
+	// placementEpoch is the placement epoch that the execution Pod held.
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	PlacementEpoch int64 `json:"placementEpoch"`
 }
 
 // ShutdownPolicy describes the policy for deleting the Sandbox when it expires.
@@ -437,6 +613,34 @@ type SandboxStatus struct {
 	// Like podIPs, it is cleared whenever the pod is absent (e.g. while suspended).
 	// +optional
 	NodeName string `json:"nodeName,omitempty"`
+
+	// placementEpoch is an alpha, experimental counter of execution placements.
+	// The controller increments it with a resourceVersion-conditional update each
+	// time it authorizes a new execution Pod. It is set only when
+	// spec.desiredLifecycle is set.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	PlacementEpoch int64 `json:"placementEpoch,omitempty"`
+
+	// executionPodUID is an alpha, experimental field that names the execution Pod
+	// holding placementEpoch. It stays set after that Pod is deleted, so the
+	// fencing owner and the next wake know which execution must be fenced.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	ExecutionPodUID string `json:"executionPodUID,omitempty"`
+
+	// committedCheckpoint is an alpha, experimental reference to the most recent
+	// committed checkpoint. The controller adopts a checkpoint only when the
+	// Sandbox UID, placementEpoch, executionPodUID, and desiredLifecycle Hibernated
+	// still match the checkpoint operation.
+	// +optional
+	CommittedCheckpoint *SandboxCheckpointReference `json:"committedCheckpoint,omitempty"`
+
+	// fencedExecution is an alpha, experimental field that an external fencing
+	// owner sets together with the ExecutionFenced condition. It names the
+	// execution that the fencing owner verified can no longer run or write.
+	// +optional
+	FencedExecution *SandboxExecutionIdentity `json:"fencedExecution,omitempty"`
 }
 
 // +genclient

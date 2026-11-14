@@ -98,6 +98,12 @@ func (cl *ClusterClient) Delete(ctx context.Context, obj client.Object) error {
 	return nil
 }
 
+// ControllerClient returns the underlying controller-runtime client, for tests
+// that act as a component other than the controller, such as a status writer.
+func (cl *ClusterClient) ControllerClient() client.Client {
+	return cl.client
+}
+
 // Get retrieves an object from the cluster.
 func (cl *ClusterClient) Get(ctx context.Context, key types.NamespacedName, obj client.Object) error {
 	cl.Helper()
